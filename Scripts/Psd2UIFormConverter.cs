@@ -837,7 +837,7 @@ namespace UGF.EditorTools.Psd2UGUI
         /// slot_1431_board → board → Image/Board
         /// slot_6096_icon_high_1 → icon → Image/Icon
         /// </summary>
-        private static string GetImageSubdirFromPsdName(string psdName)
+        internal static string GetImageSubdirFromPsdName(string psdName)
         {
             // 去掉 img_ / img9_ 前缀（项目纹理命名规范），再匹配 slot_XXXX_keyword
             var cleanName = System.Text.RegularExpressions.Regex.Replace(psdName, @"^img9?_", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -2217,7 +2217,6 @@ private void ResolveLayerNameLookup(PsdLayerNode[] nodes = null)
         {
             sharedSpriteAssets.Clear();
             if (nodes == null || nodes.Length == 0) return;
-            if (!TryEnsureSharedOutputDirectory(out var sharedDir)) return;
             var referencedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var node in nodes)
             {
@@ -2230,7 +2229,7 @@ private void ResolveLayerNameLookup(PsdLayerNode[] nodes = null)
                 {
                     continue;
                 }
-                var exportedPath = targetNode.ExportImageAsset(true, sharedDir, key, false, true);
+                var exportedPath = targetNode.ExportImageAsset(true, null, key, false, true);
                 if (!string.IsNullOrEmpty(exportedPath))
                 {
                     RegisterSharedSprite(key, exportedPath);
@@ -2257,14 +2256,14 @@ private void ResolveLayerNameLookup(PsdLayerNode[] nodes = null)
                 return false;
             }
         }
-        private bool TryEnsureSharedOutputDirectory(out string sharedDir)
+        private bool TryEnsureSharedOutputDirectory(string classifyName, out string sharedDir)
         {
             sharedDir = null;
-            var configuredPath = UGUIParser.Instance?.SharedAssetsOutput;
-            if (string.IsNullOrWhiteSpace(configuredPath)) return false;
+            var baseDir = Psd2UIFormSettings.Instance.UIImagesOutputDir;
+            if (string.IsNullOrWhiteSpace(baseDir)) return false;
 
-            sharedDir = NormalizeAssetDirectory(configuredPath);
-            if (string.IsNullOrWhiteSpace(sharedDir)) return false;
+            var subDir = GetImageSubdirFromPsdName(classifyName);
+            sharedDir = Path.Combine(baseDir, subDir).Replace("\\", "/");
 
             if (!Directory.Exists(sharedDir))
             {
@@ -2651,22 +2650,11 @@ private void ResolveLayerNameLookup(PsdLayerNode[] nodes = null)
             {
                 return cachedPath.Replace("\\", "/");
             }
-            if (!TryEnsureSharedOutputDirectory(out var sharedDir))
-            {
-                Debug.LogWarning($"SharedAssetsOutput未配置, 无法复用图层:{requester.name}");
-                return null;
-            }
-            var sharedAssetPath = Path.Combine(sharedDir, requester.ReuseTargetKey + ".png").Replace("\\", "/");
-            if (File.Exists(sharedAssetPath))
-            {
-                RegisterSharedSprite(requester.ReuseTargetKey, sharedAssetPath);
-                return sharedAssetPath;
-            }
 
             ResolveLayerNameLookup();
             if (!layerLookupByName.TryGetValue(requester.ReuseTargetKey, out var targetNode) || targetNode == null)
             {
-                var exportedPath = requester.ExportImageAsset(true, sharedDir, requester.ReuseTargetKey, false, auto9Slice, ignoreReference: true);
+                var exportedPath = requester.ExportImageAsset(true, null, requester.ReuseTargetKey, false, auto9Slice, ignoreReference: true);
                 if (!string.IsNullOrEmpty(exportedPath))
                 {
                     RegisterSharedSprite(requester.ReuseTargetKey, exportedPath);
@@ -2677,7 +2665,7 @@ private void ResolveLayerNameLookup(PsdLayerNode[] nodes = null)
             }
             else
             {
-                var exportedPath = targetNode.ExportImageAsset(true, sharedDir, requester.ReuseTargetKey, false, auto9Slice);
+                var exportedPath = targetNode.ExportImageAsset(true, null, requester.ReuseTargetKey, false, auto9Slice);
                 if (!string.IsNullOrEmpty(exportedPath))
                 {
                     RegisterSharedSprite(requester.ReuseTargetKey, exportedPath);
@@ -2711,8 +2699,7 @@ private void ResolveLayerNameLookup(PsdLayerNode[] nodes = null)
             if (node == null) return false;
             var key = node.LayerNameLookupKey;
             if (string.IsNullOrEmpty(key) || !referencedLayerKeys.Contains(key)) return false;
-            if (!TryEnsureSharedOutputDirectory(out var sharedDir)) return false;
-            exportDir = sharedDir;
+            if (string.IsNullOrWhiteSpace(Psd2UIFormSettings.Instance.UIImagesOutputDir)) return false;
             fileName = key;
             return true;
         }
@@ -3037,6 +3024,15 @@ private void ResolveLayerNameLookup(PsdLayerNode[] nodes = null)
                     texImporter.SaveAndReimport();
                 }
             }
+        }
+
+        internal static void ApplySpriteBorder(string spriteAssetPath, Vector4 border)
+        {
+            var assetPath = NormalizeToAssetPath(spriteAssetPath);
+            var texImporter = AssetImporter.GetAtPath(assetPath) as TextureImporter;
+            if (texImporter == null) return;
+            texImporter.spriteBorder = border;
+            texImporter.SaveAndReimport();
         }
 
         /// <summary>

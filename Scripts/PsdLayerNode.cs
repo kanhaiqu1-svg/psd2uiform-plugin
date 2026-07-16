@@ -27,6 +27,7 @@ using UnityEditor;
 using UnityEditorInternal;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using cn.efunstudio.psdreader;
 using cn.efunstudio.psdreader.PsdParser;
 
@@ -316,6 +317,9 @@ namespace UGF.EditorTools.Psd2UGUI
         [ReadOnlyField][SerializeField] string sourceLayerName;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [SerializeField] internal bool markToExport;
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
+        [HideInInspector][SerializeField] internal float ExportResizeRatio = 1.0f;
+        [HideInInspector] internal Vector4 CroppedNineSliceBorder = Vector4.zero;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [HideInInspector][SerializeField] internal GUIType UIType;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
@@ -621,6 +625,7 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (node == null) return "PsdLayer";
             var rawName = string.IsNullOrWhiteSpace(node.name) ? node.UIType.ToString() : node.name;
+            rawName = Regex.Replace(rawName, @"R(\d+)$", "", RegexOptions.IgnoreCase);
             return GetSanitizedExportName(rawName, convertFileNameToLower, node.UIType.ToString());
         }
 
@@ -754,9 +759,51 @@ namespace UGF.EditorTools.Psd2UGUI
                     return null;
                 }
 
-                var bytes = exportTexture.EncodeToPNG();
-                DestroyImmediate(exportTexture);
-                exportDir = string.IsNullOrWhiteSpace(exportDir) ? this.Converter.GetUIFormImagesOutputDir() : exportDir;
+                float resizeRatio = 1.0f;
+                string ratioSourceName = !string.IsNullOrWhiteSpace(SourceLayerName) ? SourceLayerName : this.name;
+                var rMatch = Regex.Match(ratioSourceName, @"R(\d+)$", RegexOptions.IgnoreCase);
+                if (rMatch.Success) resizeRatio = int.Parse(rMatch.Groups[1].Value) / 100f;
+                this.ExportResizeRatio = resizeRatio;
+
+                Texture2D finalTexture = exportTexture;
+                if (!Mathf.Approximately(resizeRatio, 1.0f))
+                {
+                    int targetW = Mathf.Max(1, Mathf.RoundToInt(exportTexture.width * resizeRatio));
+                    int targetH = Mathf.Max(1, Mathf.RoundToInt(exportTexture.height * resizeRatio));
+                    finalTexture = ResizeTexture(exportTexture, targetW, targetH);
+                    DestroyImmediate(exportTexture);
+                }
+
+                CroppedNineSliceBorder = Vector4.zero;
+                if (IsNineSliceLayer())
+                {
+                    var (cropped, border) = CropNineSliceTexture(finalTexture);
+                    if (cropped != finalTexture)
+                    {
+                        if (cropped.width != finalTexture.width || cropped.height != finalTexture.height)
+                        {
+                            Debug.Log($"[9SliceCrop] {name}: {finalTexture.width}x{finalTexture.height} -> {cropped.width}x{cropped.height}, border={border}");
+                            DestroyImmediate(finalTexture);
+                            finalTexture = cropped;
+                            CroppedNineSliceBorder = border;
+                        }
+                        else
+                        {
+                            Debug.Log($"[9SliceCrop] {name}: no size reduction ({finalTexture.width}x{finalTexture.height}), skipped");
+                            DestroyImmediate(cropped);
+                        }
+                    }
+                }
+
+                var bytes = finalTexture.EncodeToPNG();
+                DestroyImmediate(finalTexture);
+                if (string.IsNullOrWhiteSpace(exportDir))
+                {
+                    var baseDir = Psd2UIFormSettings.Instance.UIImagesOutputDir;
+                    var classifyName = !string.IsNullOrWhiteSpace(SourceLayerName) ? SourceLayerName : this.name;
+                    var subDir = Psd2UIFormConverter.GetImageSubdirFromPsdName(classifyName);
+                    exportDir = Path.Combine(baseDir, subDir).Replace("\\", "/");
+                }
                 if (!Directory.Exists(exportDir))
                 {
                     try
@@ -808,7 +855,11 @@ namespace UGF.EditorTools.Psd2UGUI
                 AssetDatabase.Refresh();
                 assetName = Psd2UIFormConverter.NormalizeToAssetPath(assetName);
                 Psd2UIFormConverter.ConvertTexturesType(new string[] { assetName }, isImage || forceSpriteType);
-                if (auto9Slice)
+                if (CroppedNineSliceBorder != Vector4.zero)
+                {
+                    Psd2UIFormConverter.ApplySpriteBorder(assetName, CroppedNineSliceBorder);
+                }
+                else if (auto9Slice)
                 {
                     Psd2UIFormConverter.ApplySpriteNineSlice(assetName);
                 }
@@ -970,6 +1021,136 @@ namespace UGF.EditorTools.Psd2UGUI
             texture.SetPixels32(colors);
             texture.Apply();
             return texture;
+        }
+
+        private static Texture2D ResizeTexture(Texture2D source, int targetWidth, int targetHeight)
+        {
+            RenderTexture rt = RenderTexture.GetTemporary(targetWidth, targetHeight, 0, RenderTextureFormat.ARGB32);
+            RenderTexture.active = rt;
+            Graphics.Blit(source, rt);
+            Texture2D result = new Texture2D(targetWidth, targetHeight, TextureFormat.RGBA32, false);
+            result.ReadPixels(new Rect(0, 0, targetWidth, targetHeight), 0, 0);
+            result.Apply();
+            RenderTexture.active = null;
+            RenderTexture.ReleaseTemporary(rt);
+            return result;
+        }
+
+        /// <summary>
+        /// Crop a 9-slice sprite by removing repeating rows/columns (identical to neighbors).
+        /// Based on Auto9Slicer algorithm (kyubuns).
+        /// Returns the cropped texture and the new 9-slice border.
+        /// </summary>
+        internal static (Texture2D texture, Vector4 border) CropNineSliceTexture(Texture2D source)
+        {
+            int w = source.width;
+            int h = source.height;
+            var pixels = source.GetPixels32();
+
+            // Normalize fully transparent pixels to uniform Color.clear
+            for (int i = 0; i < pixels.Length; i++)
+                if (pixels[i].a == 0) pixels[i] = new Color32(0, 0, 0, 0);
+
+            const int tolerate = 5; // small per-channel tolerance for anti-aliasing / compression noise
+            var xDiff = CalcDiffList(pixels, w, h, axis: 0, tolerate); // compare columns
+            var yDiff = CalcDiffList(pixels, w, h, axis: 1, tolerate); // compare rows
+
+            int margin = 1, centerSize = 2;
+            var (xStart, xEnd) = FindLongestZeroRun(xDiff, margin);
+            var (yStart, yEnd) = FindLongestZeroRun(yDiff, margin);
+
+            Debug.Log($"[9SliceCrop] {w}x{h} -> xRun=({xStart},{xEnd}) yRun=({yStart},{yEnd})");
+
+            bool skipX = xStart == 0 && xEnd == 0;
+            bool skipY = yStart == 0 && yEnd == 0;
+
+            int outW = w - (xEnd - xStart) + (skipX ? 0 : centerSize - 1);
+            int outH = h - (yEnd - yStart) + (skipY ? 0 : centerSize - 1);
+            var outPixels = new Color32[outW * outH];
+
+            for (int ox = 0, sx = 0; ox < outW; ox++, sx++)
+            {
+                if (sx == xStart && !skipX) sx += (xEnd - xStart) - centerSize + 1;
+                for (int oy = 0, sy = 0; oy < outH; oy++, sy++)
+                {
+                    if (sy == yStart && !skipY) sy += (yEnd - yStart) - centerSize + 1;
+                    outPixels[oy * outW + ox] = pixels[sy * w + sx];
+                }
+            }
+
+            var output = new Texture2D(outW, outH, TextureFormat.RGBA32, false);
+            output.SetPixels32(outPixels);
+            output.Apply();
+
+            int left = skipX ? 0 : xStart;
+            int bottom = skipY ? 0 : yStart;
+            int right = skipX ? 0 : (w - xEnd) - 1;
+            int top = skipY ? 0 : (h - yEnd) - 1;
+
+            return (output, new Vector4(left, bottom, right, top));
+        }
+
+        private static ulong[] CalcDiffList(Color32[] pixels, int w, int h, int axis, int tolerate)
+        {
+            // axis 0 = compare adjacent columns (X direction)
+            // axis 1 = compare adjacent rows (Y direction)
+            int count = axis == 0 ? w : h;
+            var diff = new ulong[count];
+            diff[0] = ulong.MaxValue;
+
+            for (int i = 1; i < count; i++)
+            {
+                ulong d = 0;
+                for (int j = 0; j < (axis == 0 ? h : w); j++)
+                {
+                    int cur = axis == 0 ? (j * w + i) : (i * w + j);
+                    int prv = axis == 0 ? (j * w + i - 1) : ((i - 1) * w + j);
+                    d += (ulong)PixelDiff(pixels[cur], pixels[prv], tolerate);
+                }
+                diff[i] = d;
+            }
+            return diff;
+        }
+
+        private static int PixelDiff(Color32 a, Color32 b, int tolerate)
+        {
+            int rd = Mathf.Abs(a.r - b.r);
+            int gd = Mathf.Abs(a.g - b.g);
+            int bd = Mathf.Abs(a.b - b.b);
+            int ad = Mathf.Abs(a.a - b.a);
+            if (rd <= tolerate) rd = 0;
+            if (gd <= tolerate) gd = 0;
+            if (bd <= tolerate) bd = 0;
+            if (ad <= tolerate) ad = 0;
+            return rd + gd + bd + ad;
+        }
+
+        private static (int start, int end) FindLongestZeroRun(ulong[] list, int margin)
+        {
+            int bestStart = 0, bestEnd = 0;
+            int curStart = 0, curEnd = 0;
+
+            for (int i = 0; i < list.Length; i++)
+            {
+                if (list[i] == 0) { curEnd = i; continue; }
+                if (bestEnd - bestStart < curEnd - curStart) { bestStart = curStart; bestEnd = curEnd; }
+                curStart = i; curEnd = i;
+            }
+            if (bestEnd - bestStart < curEnd - curStart) { bestStart = curStart; bestEnd = curEnd; }
+
+            bestStart += margin;
+            bestEnd -= margin;
+
+            if (bestEnd <= bestStart) { bestStart = 0; bestEnd = 0; }
+
+            return (bestStart, bestEnd);
+        }
+
+        private bool IsNineSliceLayer()
+        {
+            string n = !string.IsNullOrWhiteSpace(SourceLayerName) ? SourceLayerName : name;
+            return n.Contains("[sliced]", StringComparison.OrdinalIgnoreCase)
+                || n.Contains("[tiled]", StringComparison.OrdinalIgnoreCase);
         }
 
         internal bool TryGetLayerColor(out Color color)
