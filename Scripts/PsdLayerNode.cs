@@ -423,6 +423,17 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         internal PsdLayerType LayerType { get => mLayerType; }
         internal string SourceLayerName => sourceLayerName;
+        // Fatcat定制: 使用父级Converter替代单例(修复单例污染)
+        private Psd2UIFormConverter _cachedConverter;
+        internal Psd2UIFormConverter Converter
+        {
+            get
+            {
+                if (_cachedConverter == null)
+                    _cachedConverter = GetComponentInParent<Psd2UIFormConverter>();
+                return _cachedConverter;
+            }
+        }
         internal string GeneratedNodeId => generatedNodeId;
         internal bool IsMainUIType => rasterizeGroupForOpacity || UGUIParser.IsMainUIType(UIType);
         internal bool HasReuseReference => !string.IsNullOrEmpty(ReuseTargetKey);
@@ -930,7 +941,7 @@ namespace UGF.EditorTools.Psd2UGUI
         /// <returns></returns>
         internal string ExportImageAsset(bool forceSpriteType = false, string overrideExportDir = null, string overrideFileName = null, bool convertFileNameToLower = true, bool auto9Slice = false, bool ignoreReference = false)
         {
-            var converter = Psd2UIFormConverter.Instance;
+            var converter = this.Converter; // Fatcat定制: 用父级Converter替代单例
             if (converter != null && converter.TryGetSharedSpritePath(this, out var sharedPath))
             {
                 return sharedPath;

@@ -474,6 +474,7 @@ namespace UGF.EditorTools.Psd2UGUI
         [HideInInspector][SerializeField] private UnityEngine.Sprite previewSprite;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [HideInInspector][SerializeField] private string psdAssetPath;
+        [HideInInspector][SerializeField] private string slotRootPath; // Fatcat定制: Slot根目录(供Prefab导出默认路径)
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [Header("Debug:")][SerializeField] bool drawLayerRectGizmos = true;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
@@ -1023,6 +1024,7 @@ namespace UGF.EditorTools.Psd2UGUI
             bool needDestroyInstance = instanceRoot == null;
             if (instanceRoot != null)
             {
+                instanceRoot.SetPsdAsset(psdFile); // Fatcat定制: re-parse也刷新PSD绑定与slotRootPath
                 return ParsePsdLayer2Root(psdFile, instanceRoot, keepExistingUIType);
             }
             else
@@ -1125,6 +1127,9 @@ namespace UGF.EditorTools.Psd2UGUI
         private void SetPsdAsset(string psdFile)
         {
             psdAssetPath = NormalizeAssetPath(psdFile);
+            // Fatcat定制: 自动检测 Slot 根目录(供 Prefab 导出默认路径)
+            var psdDir = Path.GetDirectoryName(psdAssetPath)?.Replace("\\", "/");
+            this.slotRootPath = DetectSlotRoot(psdDir);
             this.psdAsset = LoadPsdSpriteAsset(psdAssetPath);
             this.previewSprite = this.psdAsset != null || !IsPsbSourceDocument(psdAssetPath)
                 ? null
@@ -1181,10 +1186,21 @@ namespace UGF.EditorTools.Psd2UGUI
             if (sprite != null) return sprite;
 
             var assets = AssetDatabase.LoadAllAssetsAtPath(psdFile);
-            if (assets == null) return null;
-            foreach (var asset in assets)
+            if (assets != null)
             {
-                if (asset is UnityEngine.Sprite subSprite) return subSprite;
+                foreach (var asset in assets)
+                {
+                    if (asset is UnityEngine.Sprite subSprite) return subSprite;
+                }
+            }
+
+            // Fatcat定制: 回退——PSD未按Sprite导入时, 用拼合纹理临时创建Sprite供场景显示(沿用旧版行为)
+            var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(psdFile);
+            if (tex != null)
+            {
+                var fallbackSprite = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), 100f);
+                fallbackSprite.name = tex.name;
+                return fallbackSprite;
             }
 
             return null;
@@ -2244,7 +2260,8 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
                 else
                 {
-                    string cocosLastDir = string.IsNullOrWhiteSpace(Psd2UIFormSettings.Instance.LastUIFormOutputDir) ? "Assets" : Psd2UIFormSettings.Instance.LastUIFormOutputDir;
+                    var cocosDefaultDir = !string.IsNullOrWhiteSpace(slotRootPath) ? slotRootPath + "/Prefab/" : "Assets";
+                    string cocosLastDir = string.IsNullOrWhiteSpace(Psd2UIFormSettings.Instance.LastUIFormOutputDir) ? cocosDefaultDir : Psd2UIFormSettings.Instance.LastUIFormOutputDir;
                     string cocosSelectDir = EditorUtility.SaveFolderPanel("保存目录", cocosLastDir, null);
                     if (!string.IsNullOrWhiteSpace(cocosSelectDir))
                     {
@@ -2263,7 +2280,8 @@ namespace UGF.EditorTools.Psd2UGUI
             }
             else
             {
-                string lastSaveDir = string.IsNullOrWhiteSpace(Psd2UIFormSettings.Instance.LastUIFormOutputDir) ? "Assets" : Psd2UIFormSettings.Instance.LastUIFormOutputDir;
+                var uguiDefaultDir = !string.IsNullOrWhiteSpace(slotRootPath) ? slotRootPath + "/Prefab/" : "Assets"; // Fatcat定制: 默认Slot根目录/Prefab/
+                string lastSaveDir = string.IsNullOrWhiteSpace(Psd2UIFormSettings.Instance.LastUIFormOutputDir) ? uguiDefaultDir : Psd2UIFormSettings.Instance.LastUIFormOutputDir;
                 string selectDir = EditorUtility.SaveFolderPanel("保存目录", lastSaveDir, null);
                 if (!string.IsNullOrWhiteSpace(selectDir))
                 {
@@ -2341,6 +2359,11 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         private bool ExportUIPrefab(Transform root, string outputDir)
         {
+            // Fatcat定制: Slot 根目录下的 Prefab/ 作为默认输出目录(允许设置或选择器覆盖)
+            if (string.IsNullOrWhiteSpace(outputDir) && !string.IsNullOrWhiteSpace(slotRootPath))
+            {
+                outputDir = slotRootPath + "/Prefab/";
+            }
             if (!string.IsNullOrWhiteSpace(outputDir))
             {
                 if (!Directory.Exists(outputDir))
@@ -2363,7 +2386,15 @@ namespace UGF.EditorTools.Psd2UGUI
                 return false;
             }
             RefreshNodesBindLayer();
-            var prefabName = Path.Combine(outputDir, $"{uiFormName}.prefab");
+            // Fatcat定制: 遵循 prefab_slotXXXX_xxx 命名规范(去 slot_ 下划线, 加 prefab_ 前缀)
+            var baseName = System.Text.RegularExpressions.Regex.Replace(uiFormName, @"^[Ss]lot_(\d+)", "slot$1");
+            var prefabFileName = baseName.StartsWith("prefab_", StringComparison.OrdinalIgnoreCase)
+                ? baseName
+                : "prefab_" + baseName;
+            var prefabName = Path.Combine(outputDir, $"{prefabFileName}.prefab").Replace("\\", "/");
+            // Fatcat定制: 标准化目录路径(兼容软链接映射), 再拼接文件名
+            var prefabDir = Path.GetDirectoryName(prefabName).Replace("\\", "/");
+            prefabName = NormalizeToAssetPath(prefabDir) + "/" + Path.GetFileName(prefabName);
             if (root == this.transform && File.Exists(prefabName))
             {
                 int option = EditorUtility.DisplayDialogComplex(
@@ -4637,7 +4668,8 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             foreach (var item in texAssets)
             {
-                var texImporter = AssetImporter.GetAtPath(item) as TextureImporter;
+                var assetPath = NormalizeToAssetPath(item); // Fatcat定制: 路径标准化(软链接映射)
+                var texImporter = AssetImporter.GetAtPath(assetPath) as TextureImporter;
                 if (texImporter == null)
                 {
                     Debug.LogError($"TextureImporter为空:{item}");
@@ -4669,6 +4701,7 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         internal static void ApplySpriteNineSlice(string spriteAssetPath)
         {
+            spriteAssetPath = NormalizeToAssetPath(spriteAssetPath); // Fatcat定制: 路径标准化(软链接映射)
             var texImporter = AssetImporter.GetAtPath(spriteAssetPath) as TextureImporter;
             if (texImporter == null)
             {
@@ -4737,6 +4770,88 @@ namespace UGF.EditorTools.Psd2UGUI
 #endif
         }
         /// <summary>
+        /// 从 PSD 所在目录向上查找 Slot_XXXX 根目录(Fatcat定制)
+        /// </summary>
+        private static string DetectSlotRoot(string psdDir)
+        {
+            var dir = psdDir;
+            while (!string.IsNullOrEmpty(dir))
+            {
+                var dirName = Path.GetFileName(dir);
+                if (System.Text.RegularExpressions.Regex.IsMatch(dirName, @"^[Ss]lot[_-]?\d+$"))
+                {
+                    return dir;
+                }
+                var parent = Path.GetDirectoryName(dir);
+                if (parent == dir || string.IsNullOrEmpty(parent)) break;
+                dir = parent;
+            }
+            return psdDir; // fallback: 使用 PSD 所在目录
+        }
+
+        /// <summary>
+        /// 将工程外路径(软链接)标准化为 Assets 相对路径(Fatcat定制)。
+        /// 例如 ../ResFatcat/... → Assets/UsrAssets/Res/...
+        /// </summary>
+        internal static string NormalizeToAssetPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return path;
+            if (path.StartsWith("Assets/") || path.StartsWith("Assets\\")) return path;
+
+            var fullPath = Path.GetFullPath(path);
+            var assetsFullPath = Path.GetFullPath(Application.dataPath) + Path.DirectorySeparatorChar;
+
+            // 情况1: 直接在 Assets 目录下
+            if (fullPath.StartsWith(assetsFullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return "Assets/" + fullPath.Substring(assetsFullPath.Length)
+                    .Replace("\\", "/").TrimEnd('/');
+            }
+
+            // 情况2: 工程外路径（通过软链接访问）。
+            // 收集 Assets 下最多3层的子目录，用相对路径前缀试匹配。
+            // 3层足够覆盖 Assets/UsrAssets/Res 这种两级软链接。
+            var parts = fullPath.Replace("\\", "/").TrimEnd('/').Split('/');
+            var assetPrefixes = new List<string>();
+            CollectAssetPrefixes(Application.dataPath, "Assets", 0, assetPrefixes);
+
+            foreach (var prefix in assetPrefixes)
+            {
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    if (parts[i] == ".." || parts[i] == ".") continue;
+                    var suffix = string.Join("/", parts, i, parts.Length - i);
+                    var candidate = prefix + "/" + suffix;
+                    if (File.Exists(candidate) || Directory.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+
+            return path;
+        }
+
+        private static void CollectAssetPrefixes(string dirFullPath, string dirRelativePath, int depth, List<string> results)
+        {
+            if (depth >= 3) return;
+            try
+            {
+                foreach (var subDir in Directory.GetDirectories(dirFullPath))
+                {
+                    var dirName = Path.GetFileName(subDir);
+                    var relPath = dirRelativePath + "/" + dirName;
+                    results.Add(relPath);
+                    CollectAssetPrefixes(subDir, relPath, depth + 1, results);
+                }
+            }
+            catch (System.Exception)
+            {
+                // 跳过无权限访问的目录
+            }
+        }
+
+        /// <summary>
         /// 从 PSD 文件名提取关键字，映射到 Image 子目录。(Fatcat定制)
         /// slot_1431_board → board → Image/Board
         /// slot_6096_icon_high_1 → icon → Image/Icon
@@ -4783,7 +4898,9 @@ namespace UGF.EditorTools.Psd2UGUI
         /// <returns></returns>
         internal string GetUIFormImagesOutputDir()
         {
-            return Path.Combine(Psd2UIFormSettings.Instance.UIImagesOutputDir, uiFormName);
+            // Fatcat定制: 按 PSD 文件名关键字自动分类到 Image/Board, Image/Icon 等子目录
+            var subDir = GetImageSubdirFromPsdName(uiFormName);
+            return Path.Combine(Psd2UIFormSettings.Instance.UIImagesOutputDir, subDir).Replace("\\", "/");
         }
 
     }

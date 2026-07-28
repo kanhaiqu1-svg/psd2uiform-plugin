@@ -113,6 +113,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
         internal static bool TryCropMinimalNineSlice(string assetPath)
         {
+            assetPath = Psd2UIFormConverter.NormalizeToAssetPath(assetPath); // Fatcat定制: 路径标准化(软链接映射)
             var texImporter = AssetImporter.GetAtPath(assetPath) as TextureImporter;
             if (texImporter == null || texImporter.textureType != TextureImporterType.Sprite)
             {
