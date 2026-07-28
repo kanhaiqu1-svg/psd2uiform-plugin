@@ -38,7 +38,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
         internal override void ParseAndAttachUIElements()
         {
-            if (LayerNode.IsTextLayer(out var _))
+            if (LayerNode.ParseTextLayerInfo(out var _))
             {
                 text = LayerNode;
             }
@@ -52,7 +52,8 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             var textCom = uiRoot.GetComponentInChildren<UnityEngine.UI.Text>();
             var textInfo = UGUIParser.SetTextStyle(text, textCom);
-            UGUIParser.SetRectTransform(text, textCom);
+            UGUIParser.SetTextRectTransform(text, textCom);
+            UGUIParser.SetTextRotation(text, textCom);
         }
     }
 }

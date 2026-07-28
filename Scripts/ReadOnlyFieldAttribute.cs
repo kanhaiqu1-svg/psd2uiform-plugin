@@ -34,11 +34,13 @@ namespace UGF.EditorTools.Psd2UGUI
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     internal sealed class ReadOnlyFieldDrawer : PropertyDrawer
     {
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
         {
             return EditorGUI.GetPropertyHeight(property, label, true);
         }
 
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
             GUI.enabled = false;

@@ -21,12 +21,14 @@ https://shop106471535.taobao.com
 #if UNITY_EDITOR
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using TMPro;
 using cn.efunstudio.psdreader;
+using cn.efunstudio.psdreader.PsdParser;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
@@ -47,12 +49,14 @@ namespace UGF.EditorTools.Psd2UGUI
         Slider,
         ScrollView,
         Mask,
-        FillColor, // Solid color fill
+        FillColor = 11, // Solid color fill
         TMPText,
         TMPButton,
         TMPDropdown,
         TMPInputField,
         TMPToggle,
+        Panel = 17,
+        ToggleGroup,
 
         // UI subtypes start at 101. Values 0-100 are reserved for primary UI types.
         Background = 101, // Generic background
@@ -87,6 +91,12 @@ namespace UGF.EditorTools.Psd2UGUI
         ScrollView_VerticalBarBG, // Vertical scrollbar background
         ScrollView_VerticalBar, // Vertical scrollbar handle
     }
+    public enum TMPGradientConversionMode
+    {
+        Auto = 0,
+        EditableNative = 1,
+        ExactTexture = 2,
+    }
     [Serializable]
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     public class UGUIParseRule
@@ -103,27 +113,32 @@ namespace UGF.EditorTools.Psd2UGUI
     internal sealed class UGUIParserEditor : Editor
     {
         private SerializedProperty readmeProperty;
-        SerializedProperty defaultTextType;
-        SerializedProperty defaultImageType;
-        SerializedProperty forceUseTMP;
-        SerializedProperty convertZh2En;
-        SerializedProperty nineSliceBorderTolerance;
-        SerializedProperty sharedAssetsOutput;
-        SerializedProperty sharedPrefabOutput;
+        private SerializedProperty defaultTextType;
+        private SerializedProperty defaultImageType;
+        private SerializedProperty forceUseTMP;
+        private SerializedProperty tmpGradientConversionMode;
+        private SerializedProperty convertZh2En;
+        private SerializedProperty nineSliceBorderTolerance;
+        private SerializedProperty sharedAssetsOutput;
+        private SerializedProperty sharedPrefabOutput;
+        private SerializedProperty aiProviderConfig;
         private string[] textTypesDisplay;
         private int[] textTypes;
         private string[] imageTypesDisplay;
         private int[] imageTypes;
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         private void OnEnable()
         {
             readmeProperty = serializedObject.FindProperty("readmeDoc");
             defaultTextType = serializedObject.FindProperty("defaultTextType");
             defaultImageType = serializedObject.FindProperty("defaultImageType");
             forceUseTMP = serializedObject.FindProperty("forceUseTMP");
+            tmpGradientConversionMode = serializedObject.FindProperty("tmpGradientConversionMode");
             convertZh2En = serializedObject.FindProperty("convertZh2En");
             nineSliceBorderTolerance = serializedObject.FindProperty("nineSliceBorderTolerance");
             sharedAssetsOutput = serializedObject.FindProperty("sharedAssetsOutput");
             sharedPrefabOutput = serializedObject.FindProperty("sharedPrefabOutput");
+            aiProviderConfig = serializedObject.FindProperty("aiProviderConfig");
             var textEnums = new GUIType[] { GUIType.Text, GUIType.TMPText };
             textTypes = new int[textEnums.Length];
             textTypesDisplay = new string[textEnums.Length];
@@ -143,9 +158,11 @@ namespace UGF.EditorTools.Psd2UGUI
                 imageTypesDisplay[i] = imageEnum.ToString();
             }
         }
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         public override void OnInspectorGUI()
         {
             serializedObject.Update();
+            PsdReaderProductAccess.EnsureDailyUpdateCheck();
             if (GUILayout.Button("使用教程"))
             {
                 Application.OpenURL("https://efunstudio.cn");
@@ -154,7 +171,7 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 (target as UGUIParser).ExportReadmeDoc();
             }
-            if (GUILayout.Button("导出Rules标签"))
+            if (GUILayout.Button("导出PS脚本工具"))
             {
                 (target as UGUIParser).ExportLayerTagMenuConfig();
             }
@@ -173,8 +190,49 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
             }
 
+            if (GUILayout.Button("新手引导"))
+            {
+                Psd2UIFormOnboardingWindow.ShowWindow();
+            }
+
             EditorGUILayout.LabelField("使用说明:");
             readmeProperty.stringValue = EditorGUILayout.TextArea(readmeProperty.stringValue, GUILayout.Height(100));
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("插件授权:");
+            using (new EditorGUILayout.VerticalScope("box"))
+            {
+                EditorGUILayout.LabelField("当前状态:", PsdReaderProductAccess.GetStatusLabel());
+
+                MessageType messageType = PsdReaderProductAccess.NeedsAttention
+                    ? MessageType.Warning
+                    : MessageType.Info;
+                EditorGUILayout.HelpBox(PsdReaderProductAccess.GetOverviewMessage(), messageType);
+
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button("授权管理"))
+                    {
+                        PsdReaderProductAccess.OpenManagementWindow();
+                    }
+
+                    if (GUILayout.Button("获取订单号"))
+                    {
+                        Application.OpenURL("https://shop106471535.taobao.com");
+                    }
+                }
+
+                if (PsdReaderProductAccess.HasPendingUpdateTip())
+                {
+                    if (Psd2UIFormEditorNoticeUtility.DrawVersionUpdateNotice(PsdReaderProductAccess.GetPendingUpdateTipMessage(), "下载"))
+                    {
+                        if (PsdReaderProductAccess.TryOpenPendingUpdateDownloadUrl())
+                        {
+                            GUIUtility.ExitGUI();
+                        }
+                    }
+                }
+            }
 
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -183,17 +241,28 @@ namespace UGF.EditorTools.Psd2UGUI
 
             using (new EditorGUILayout.HorizontalScope())
             {
-                defaultTextType.enumValueIndex = EditorGUILayout.IntPopup("默认文本类型:", defaultTextType.enumValueIndex, textTypesDisplay, textTypes);
+                Psd2UIFormSettings.Instance.AutoCropMinimalNineSlice = EditorGUILayout.ToggleLeft("导出时自动裁剪九宫格", Psd2UIFormSettings.Instance.AutoCropMinimalNineSlice);
+            }
+            EditorGUILayout.HelpBox("九宫格边框由程序自动识别，结果可能与预期不符。建议保持关闭，导出后手动检查边框，再通过右键菜单 Psd2UIForm > Crop Minimal 9-Slice 批量裁剪，更安全可控。", MessageType.Info);
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                defaultTextType.intValue = EditorGUILayout.IntPopup("默认文本类型:", defaultTextType.intValue, textTypesDisplay, textTypes);
             }
 
             using (new EditorGUILayout.HorizontalScope())
             {
-                defaultImageType.enumValueIndex = EditorGUILayout.IntPopup("默认图片类型:", defaultImageType.enumValueIndex, imageTypesDisplay, imageTypes);
+                defaultImageType.intValue = EditorGUILayout.IntPopup("默认图片类型:", defaultImageType.intValue, imageTypesDisplay, imageTypes);
             }
 
             using (new EditorGUILayout.HorizontalScope())
             {
                 forceUseTMP.boolValue = EditorGUILayout.ToggleLeft("强制优先使用TMP", forceUseTMP.boolValue);
+            }
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUILayout.PropertyField(tmpGradientConversionMode, new GUIContent("TMP渐变转换"));
             }
 
             using (new EditorGUILayout.HorizontalScope())
@@ -228,8 +297,27 @@ namespace UGF.EditorTools.Psd2UGUI
                     }
                 }
             }
+
+            DrawAiProviderConfig();
             serializedObject.ApplyModifiedProperties();
             base.OnInspectorGUI();
+        }
+
+        private void DrawAiProviderConfig()
+        {
+            if (aiProviderConfig == null) return;
+
+            var providerProp = aiProviderConfig.FindPropertyRelative("provider");
+            var showCliWindowProp = aiProviderConfig.FindPropertyRelative("showCliWindow");
+            var provider = ReadAiProviderKind(providerProp);
+
+            var nextProvider = (AiProviderKind)EditorGUILayout.EnumPopup("AI 智能识别", provider);
+            WriteAiProviderKind(providerProp, nextProvider);
+            if (showCliWindowProp != null)
+            {
+                EditorGUILayout.PropertyField(showCliWindowProp, new GUIContent("CLI显示窗口"));
+            }
+            EditorGUILayout.HelpBox("注意: AI智能识别是调用本机已安装配置的Codex、Claude Code、Open Code, 识别需要模型拥有多模态能力(根据图像识别类型), 识别准确度与AI模型能力有关", MessageType.Info);
         }
 
         private void ImportConfigFromJson(SerializedObject serializedObject)
@@ -248,9 +336,10 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
 
                 // Restore simple fields
-                serializedObject.FindProperty("defaultTextType").enumValueIndex = (int)snapshot.defaultTextType;
-                serializedObject.FindProperty("defaultImageType").enumValueIndex = (int)snapshot.defaultImageType;
+                serializedObject.FindProperty("defaultTextType").intValue = (int)snapshot.defaultTextType;
+                serializedObject.FindProperty("defaultImageType").intValue = (int)snapshot.defaultImageType;
                 serializedObject.FindProperty("forceUseTMP").boolValue = snapshot.forceUseTMP;
+                serializedObject.FindProperty("tmpGradientConversionMode").enumValueIndex = (int)snapshot.tmpGradientConversionMode;
                 serializedObject.FindProperty("readmeDoc").stringValue = snapshot.readmeDoc;
                 serializedObject.FindProperty("convertZh2En").boolValue = snapshot.convertZh2En;
                 if (json.IndexOf("\"nineSliceBorderTolerance\"", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -259,6 +348,15 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
                 serializedObject.FindProperty("sharedAssetsOutput").stringValue = snapshot.sharedAssetsOutput;
                 serializedObject.FindProperty("sharedPrefabOutput").stringValue = snapshot.sharedPrefabOutput;
+                RestoreAiProviderConfigSnapshot(serializedObject.FindProperty("aiProviderConfig"), snapshot.aiProviderConfig);
+                if (json.IndexOf("\"showCliWindow\"", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var showCliWindowProp = serializedObject.FindProperty("aiProviderConfig")?.FindPropertyRelative("showCliWindow");
+                    if (showCliWindowProp != null)
+                    {
+                        showCliWindowProp.boolValue = snapshot.aiProviderConfig != null && snapshot.aiProviderConfig.showCliWindow;
+                    }
+                }
 
                 // Restore UIForm Template
                 var uiFormTemplateProp = serializedObject.FindProperty("uiFormTemplate");
@@ -284,7 +382,7 @@ namespace UGF.EditorTools.Psd2UGUI
                         rulesProp.InsertArrayElementAtIndex(i);
                         var ruleProp = rulesProp.GetArrayElementAtIndex(i);
 
-                        ruleProp.FindPropertyRelative("UIType").enumValueIndex = (int)ruleSnapshot.UIType;
+                        ruleProp.FindPropertyRelative("UIType").intValue = (int)ruleSnapshot.UIType;
                         ruleProp.FindPropertyRelative("UITypeDesc").stringValue = ruleSnapshot.UITypeDesc;
                         ruleProp.FindPropertyRelative("UIHelper").stringValue = ruleSnapshot.UIHelper;
                         ruleProp.FindPropertyRelative("Comment").stringValue = ruleSnapshot.Comment;
@@ -341,14 +439,16 @@ namespace UGF.EditorTools.Psd2UGUI
             // The user provided code shows UGUIParserEditor : Editor.
             // So we should use serializedObject to read values to ensure we get what's in inspector.
 
-            snapshot.defaultTextType = (GUIType)serializedObject.FindProperty("defaultTextType").enumValueIndex;
-            snapshot.defaultImageType = (GUIType)serializedObject.FindProperty("defaultImageType").enumValueIndex;
+            snapshot.defaultTextType = (GUIType)serializedObject.FindProperty("defaultTextType").intValue;
+            snapshot.defaultImageType = (GUIType)serializedObject.FindProperty("defaultImageType").intValue;
             snapshot.forceUseTMP = serializedObject.FindProperty("forceUseTMP").boolValue;
+            snapshot.tmpGradientConversionMode = (TMPGradientConversionMode)serializedObject.FindProperty("tmpGradientConversionMode").enumValueIndex;
             snapshot.readmeDoc = serializedObject.FindProperty("readmeDoc").stringValue;
             snapshot.convertZh2En = serializedObject.FindProperty("convertZh2En").boolValue;
             snapshot.nineSliceBorderTolerance = Mathf.Clamp(serializedObject.FindProperty("nineSliceBorderTolerance").intValue, 0, 255);
             snapshot.sharedAssetsOutput = serializedObject.FindProperty("sharedAssetsOutput").stringValue;
             snapshot.sharedPrefabOutput = serializedObject.FindProperty("sharedPrefabOutput").stringValue;
+            snapshot.aiProviderConfig = BuildAiProviderConfigSnapshot(serializedObject.FindProperty("aiProviderConfig"));
 
             // UIForm Template
             var template = serializedObject.FindProperty("uiFormTemplate").objectReferenceValue;
@@ -367,7 +467,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 {
                     var ruleProp = rulesProp.GetArrayElementAtIndex(i);
                     var ruleSnapshot = new UGUIParseRuleSnapshot();
-                    ruleSnapshot.UIType = (GUIType)ruleProp.FindPropertyRelative("UIType").enumValueIndex;
+                    ruleSnapshot.UIType = (GUIType)ruleProp.FindPropertyRelative("UIType").intValue;
                     ruleSnapshot.UITypeDesc = ruleProp.FindPropertyRelative("UITypeDesc").stringValue;
                     ruleSnapshot.UIHelper = ruleProp.FindPropertyRelative("UIHelper").stringValue;
                     ruleSnapshot.Comment = ruleProp.FindPropertyRelative("Comment").stringValue;
@@ -410,6 +510,71 @@ namespace UGF.EditorTools.Psd2UGUI
             }
         }
 
+        private static AiProviderConfigSnapshot BuildAiProviderConfigSnapshot(SerializedProperty aiProviderConfigProperty)
+        {
+            if (aiProviderConfigProperty == null) return null;
+
+            return new AiProviderConfigSnapshot
+            {
+                provider = ReadAiProviderKind(aiProviderConfigProperty.FindPropertyRelative("provider")),
+                showCliWindow = aiProviderConfigProperty.FindPropertyRelative("showCliWindow") == null
+                    || aiProviderConfigProperty.FindPropertyRelative("showCliWindow").boolValue
+            };
+        }
+
+        private static void RestoreAiProviderConfigSnapshot(SerializedProperty aiProviderConfigProperty, AiProviderConfigSnapshot snapshot)
+        {
+            if (aiProviderConfigProperty == null || snapshot == null) return;
+
+            WriteAiProviderKind(aiProviderConfigProperty.FindPropertyRelative("provider"), snapshot.provider);
+            var showCliWindowProp = aiProviderConfigProperty.FindPropertyRelative("showCliWindow");
+            if (showCliWindowProp != null)
+            {
+                showCliWindowProp.boolValue = snapshot.showCliWindow;
+            }
+        }
+
+        private static AiProviderKind ReadAiProviderKind(SerializedProperty providerProperty)
+        {
+            if (providerProperty == null)
+            {
+                return AiProviderKind.CodexCli;
+            }
+
+            switch (providerProperty.intValue)
+            {
+                case (int)AiProviderKind.CodexCli:
+                    return AiProviderKind.CodexCli;
+                case (int)AiProviderKind.ClaudeCodeCli:
+                    return AiProviderKind.ClaudeCodeCli;
+                case (int)AiProviderKind.OpenCodeCli:
+                    return AiProviderKind.OpenCodeCli;
+                default:
+                    providerProperty.intValue = (int)AiProviderKind.CodexCli;
+                    return AiProviderKind.CodexCli;
+            }
+        }
+
+        private static void WriteAiProviderKind(SerializedProperty providerProperty, AiProviderKind provider)
+        {
+            if (providerProperty == null)
+            {
+                return;
+            }
+
+            switch (provider)
+            {
+                case AiProviderKind.CodexCli:
+                case AiProviderKind.ClaudeCodeCli:
+                case AiProviderKind.OpenCodeCli:
+                    providerProperty.intValue = (int)provider;
+                    break;
+                default:
+                    providerProperty.intValue = (int)AiProviderKind.CodexCli;
+                    break;
+            }
+        }
+
         [Serializable]
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
         private sealed class UGUIParserSnapshot
@@ -417,6 +582,7 @@ namespace UGF.EditorTools.Psd2UGUI
             public GUIType defaultTextType;
             public GUIType defaultImageType;
             public bool forceUseTMP;
+            public TMPGradientConversionMode tmpGradientConversionMode;
             public string uiFormTemplateGuid;
             public UGUIParseRuleSnapshot[] rules;
             public string readmeDoc;
@@ -424,6 +590,7 @@ namespace UGF.EditorTools.Psd2UGUI
             public int nineSliceBorderTolerance;
             public string sharedAssetsOutput;
             public string sharedPrefabOutput;
+            public AiProviderConfigSnapshot aiProviderConfig;
         }
 
         [Serializable]
@@ -437,6 +604,14 @@ namespace UGF.EditorTools.Psd2UGUI
             public string UIHelper;
             public string Comment;
         }
+
+        [Serializable]
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
+        private sealed class AiProviderConfigSnapshot
+        {
+            public AiProviderKind provider;
+            public bool showCliWindow = true;
+        }
     }
     [CanEditMultipleObjects]
     [CreateAssetMenu(fileName = "Psd2UIFormConfig", menuName = "ScriptableObject/Psd2UIForm Config")]
@@ -445,8 +620,8 @@ namespace UGF.EditorTools.Psd2UGUI
     {
         internal const char UITYPE_SPLIT_CHAR = '.';
         internal const int UITYPE_MAX = 100;
-        private const string LayerTagMenuScriptPath = "Assets/Plugins/PSD2UIForm/PSScript/PSD2UGUI-LayerTagMenu.jsx";
-        private const string LayerExportScriptPath = "Assets/Plugins/PSD2UIForm/PSScript/PSD2UIForm-导出PSD.jsx";
+        private const string LayerTagMenuScriptRelativePath = "PSScript/PSD2UGUI-LayerTagMenu.jsx";
+        private const string LayerExportScriptRelativePath = "PSScript/PSD2UIForm-导出PSD.jsx";
         internal const string REF_TAG = "ref ";
         internal const string REF_PREFAB_TAG = "refp ";
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
@@ -455,6 +630,7 @@ namespace UGF.EditorTools.Psd2UGUI
         [HideInInspector][SerializeField] GUIType defaultImageType = GUIType.Image;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [SerializeField, HideInInspector] bool forceUseTMP = false;
+        [SerializeField, HideInInspector] TMPGradientConversionMode tmpGradientConversionMode = TMPGradientConversionMode.Auto;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [SerializeField] GameObject uiFormTemplate;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
@@ -469,23 +645,71 @@ namespace UGF.EditorTools.Psd2UGUI
         [HideInInspector][SerializeField] string sharedAssetsOutput = "Assets/SharedUIAssets";
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [HideInInspector][SerializeField] string sharedPrefabOutput = "Assets/SharedPrefab";
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
+        [HideInInspector][SerializeField] AiProviderConfig aiProviderConfig = new AiProviderConfig();
         /// <summary>
         /// Shared export directory for reused assets.
         /// </summary>
         internal string SharedAssetsOutput => sharedAssetsOutput;
         internal string SharedPrefabOutput => sharedPrefabOutput;
+        internal AiProviderConfig AiProviderConfig => aiProviderConfig ?? (aiProviderConfig = new AiProviderConfig());
         internal int NineSliceBorderTolerance => Mathf.Clamp(nineSliceBorderTolerance, 0, 255);
         internal GUIType DefaultText => ResolvePreferredUIType(defaultTextType);
         internal GUIType DefaultImage => defaultImageType;
         internal GameObject UIFormTemplate => uiFormTemplate;
         internal bool ConvertZh2En => convertZh2En;
         internal bool ForceUseTMP => forceUseTMP;
+        internal TMPGradientConversionMode TMPGradientMode => tmpGradientConversionMode;
         private static UGUIParser mInstance = null;
         private const string TmpEffectMaterialSignatureUserDataPrefix = "PSD2UI_TMPFX_SIG:";
         private const string LegacyTmpEffectMaterialNameToken = "__PSD2UI_TMPFX__";
         private static readonly Dictionary<string, Material> tmpEffectMaterialCache = new Dictionary<string, Material>();
-        private static readonly Dictionary<int, Material> tmpEffectMaterialBaseLookup = new Dictionary<int, Material>();
+        private static readonly Dictionary<string, Texture2D> tmpGradientTextureCache = new Dictionary<string, Texture2D>();
+        private static readonly Dictionary<
+#if UNITY_6000_0_OR_NEWER
+            EntityId,
+#else
+            int,
+#endif
+            Material> tmpEffectMaterialBaseLookup = new Dictionary<
+#if UNITY_6000_0_OR_NEWER
+                EntityId,
+#else
+                int,
+#endif
+                Material>();
+
+        private static
+#if UNITY_6000_0_OR_NEWER
+            EntityId
+#else
+            int
+#endif
+            GetObjectId(UnityEngine.Object obj)
+        {
+#if UNITY_6000_0_OR_NEWER
+            return obj.GetEntityId();
+#else
+            return obj.GetInstanceID();
+#endif
+        }
+
+        private static string GetObjectIdKey(UnityEngine.Object obj)
+        {
+            return obj != null ? GetObjectId(obj).ToString() : "0";
+        }
+
+        private static void SetTMPTextWrapping(TextMeshProUGUI text, bool isMultiLine)
+        {
+#if UNITY_6000_0_OR_NEWER
+            text.textWrappingMode = isMultiLine ? TextWrappingModes.Normal : TextWrappingModes.NoWrap;
+#else
+            text.enableWordWrapping = isMultiLine;
+#endif
+        }
         private static readonly int TmpFaceDilatePropertyId = Shader.PropertyToID("_FaceDilate");
+        private static readonly int TmpFaceTexturePropertyId = Shader.PropertyToID("_FaceTex");
+        private static readonly int TmpFaceTextureTransformPropertyId = Shader.PropertyToID("_FaceTex_ST");
         private static readonly int TmpShaderFlagsPropertyId = Shader.PropertyToID("_ShaderFlags");
         private static readonly int TmpBevelOffsetPropertyId = Shader.PropertyToID("_BevelOffset");
         private static readonly int TmpBevelWidthPropertyId = Shader.PropertyToID("_BevelWidth");
@@ -499,10 +723,8 @@ namespace UGF.EditorTools.Psd2UGUI
         private static readonly int TmpDiffusePropertyId = Shader.PropertyToID("_Diffuse");
         private static readonly int TmpAmbientPropertyId = Shader.PropertyToID("_Ambient");
         private const string TmpUnderlayInnerKeyword = "UNDERLAY_INNER";
-        private const float TmpOutlineThicknessScale = 0.5f;
-        private const float TmpBevelWidthScale = 0.5f;
-        private const float TmpShaderClamp = 1f;
-        private const float TmpDefaultGlowPower = 0.75f;
+        private const float TmpInnerGlowCompositePeakCoverage = 0.65f;
+        private static readonly byte[] TmpGradientBayer4x4 = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
         internal static UGUIParser Instance
         {
             get
@@ -517,7 +739,116 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         internal static bool IsMainUIType(GUIType tp)
         {
-            return (int)tp <= UITYPE_MAX;
+            return tp != GUIType.Null && (int)tp <= UITYPE_MAX;
+        }
+        internal static bool IsSemanticUIType(GUIType uiType)
+        {
+            return (int)uiType > UITYPE_MAX;
+        }
+        internal static bool IsTransparentContainerType(GUIType uiType)
+        {
+            return uiType == GUIType.Null || uiType == GUIType.Panel;
+        }
+        internal static bool IsCompositeControlType(GUIType uiType)
+        {
+            switch (uiType)
+            {
+                case GUIType.Button:
+                case GUIType.Dropdown:
+                case GUIType.InputField:
+                case GUIType.Toggle:
+                case GUIType.Slider:
+                case GUIType.ScrollView:
+                case GUIType.TMPButton:
+                case GUIType.TMPDropdown:
+                case GUIType.TMPInputField:
+                case GUIType.TMPToggle:
+                case GUIType.Panel:
+                case GUIType.ToggleGroup:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        internal static bool IsStandaloneGraphicMainType(GUIType uiType)
+        {
+            switch (uiType)
+            {
+                case GUIType.Image:
+                case GUIType.RawImage:
+                case GUIType.Text:
+                case GUIType.TMPText:
+                case GUIType.Mask:
+                case GUIType.FillColor:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        internal static bool HasExplicitMainChildOwnerRule(GUIType uiType)
+        {
+            switch (uiType)
+            {
+                case GUIType.ScrollView:
+                case GUIType.Toggle:
+                case GUIType.TMPToggle:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        internal static bool RequiresOwnerResolution(GUIType uiType)
+        {
+            return IsSemanticUIType(uiType) || HasExplicitMainChildOwnerRule(uiType);
+        }
+        internal static bool CanOwnSemanticRole(GUIType ownerType, GUIType roleType)
+        {
+            switch (roleType)
+            {
+                case GUIType.Background:
+                    return IsMainUIType(ownerType);
+                case GUIType.Button_Highlight:
+                case GUIType.Button_Press:
+                case GUIType.Button_Select:
+                case GUIType.Button_Disable:
+                case GUIType.Button_Text:
+                    return ownerType == GUIType.Button || ownerType == GUIType.TMPButton;
+                case GUIType.Dropdown_Label:
+                case GUIType.Dropdown_Arrow:
+                    return ownerType == GUIType.Dropdown || ownerType == GUIType.TMPDropdown;
+                case GUIType.InputField_Placeholder:
+                case GUIType.InputField_Text:
+                    return ownerType == GUIType.InputField || ownerType == GUIType.TMPInputField;
+                case GUIType.Toggle_Checkmark:
+                case GUIType.Toggle_Label:
+                    return ownerType == GUIType.Toggle || ownerType == GUIType.TMPToggle;
+                case GUIType.Slider_Fill:
+                case GUIType.Slider_Handle:
+                    return ownerType == GUIType.Slider;
+                case GUIType.ScrollView_Viewport:
+                case GUIType.ScrollView_HorizontalBarBG:
+                case GUIType.ScrollView_HorizontalBar:
+                case GUIType.ScrollView_VerticalBarBG:
+                case GUIType.ScrollView_VerticalBar:
+                    return ownerType == GUIType.ScrollView;
+                default:
+                    return false;
+            }
+        }
+        internal static bool CanOwnMainChild(GUIType ownerType, GUIType childType)
+        {
+            switch (ownerType)
+            {
+                case GUIType.Dropdown:
+                case GUIType.TMPDropdown:
+                    return childType == GUIType.ScrollView
+                        || childType == GUIType.Toggle
+                        || childType == GUIType.TMPToggle;
+                case GUIType.ToggleGroup:
+                    return childType == GUIType.Toggle || childType == GUIType.TMPToggle;
+                default:
+                    return false;
+            }
         }
         internal GUIType ResolvePreferredUIType(GUIType uiType)
         {
@@ -577,17 +908,12 @@ namespace UGF.EditorTools.Psd2UGUI
             public Dictionary<LayerTagFamily, LayerTagToken> FamilyWinners = new Dictionary<LayerTagFamily, LayerTagToken>();
             public List<string> Warnings = new List<string>();
             public GUIType MainType = GUIType.Null;
-            public GUIType RoleType = GUIType.Null;
             public bool HasExplicitMainType;
             public bool HasExplicitImageType;
             public Image.Type ExplicitImageType = Image.Type.Simple;
             public bool HasExplicitTextBackend;
             public bool ForceTMP;
             public bool ForceUGUI;
-        }
-        private static bool IsRoleUIType(GUIType uiType)
-        {
-            return (int)uiType > UITYPE_MAX;
         }
         private static GUIType ConvertToUGUIType(GUIType uiType)
         {
@@ -694,7 +1020,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     {
                         RawTag = token,
                         CanonicalTag = canonicalTag,
-                        Family = IsRoleUIType(rule.UIType) ? LayerTagFamily.Role : LayerTagFamily.Main,
+                        Family = IsSemanticUIType(rule.UIType) ? LayerTagFamily.Role : LayerTagFamily.Main,
                         UIType = rule.UIType
                     };
                     return true;
@@ -779,11 +1105,6 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (parsedInfo == null) return;
 
-            if (parsedInfo.FamilyWinners.TryGetValue(LayerTagFamily.Role, out var roleWinner))
-            {
-                parsedInfo.RoleType = roleWinner.UIType;
-            }
-
             GUIType GetImplicitMainType()
             {
                 switch (layerType)
@@ -808,13 +1129,21 @@ namespace UGF.EditorTools.Psd2UGUI
                 {
                     parsedInfo.Warnings.Add($"main tag '{mainWinner.CanonicalTag}' ignored on non-text layer");
                 }
+                else if ((requestedMainType == GUIType.Panel || requestedMainType == GUIType.ToggleGroup) && layerType != PsdLayerType.LayerGroup)
+                {
+                    parsedInfo.Warnings.Add($"main tag '{mainWinner.CanonicalTag}' ignored on non-group layer");
+                }
                 else
                 {
                     mainType = requestedMainType;
                     parsedInfo.HasExplicitMainType = true;
                 }
             }
-
+            if (parsedInfo.FamilyWinners.TryGetValue(LayerTagFamily.Role, out var roleWinner))
+            {
+                mainType = roleWinner.UIType;
+                parsedInfo.HasExplicitMainType = true;
+            }
             if (parsedInfo.FamilyWinners.TryGetValue(LayerTagFamily.TextBackend, out var backendWinner))
             {
                 parsedInfo.HasExplicitTextBackend = true;
@@ -846,6 +1175,10 @@ namespace UGF.EditorTools.Psd2UGUI
             if (rule == null || string.IsNullOrWhiteSpace(rule.UIHelper)) return null;
 
             return Type.GetType(rule.UIHelper);
+        }
+        internal UGUIParseRule[] GetRules()
+        {
+            return rules ?? Array.Empty<UGUIParseRule>();
         }
         internal UGUIParseRule GetRule(GUIType uiType)
         {
@@ -891,10 +1224,9 @@ namespace UGF.EditorTools.Psd2UGUI
         /// <param name="layer"></param>
         /// <param name="comType"></param>
         /// <returns></returns>
-        internal bool TryParse(PsdLayerNode layer, out UGUIParseRule result, out GUIType roleType)
+        internal bool TryParse(PsdLayerNode layer, out UGUIParseRule result)
         {
             result = null;
-            roleType = GUIType.Null;
             if (layer == null)
             {
                 return false;
@@ -902,7 +1234,6 @@ namespace UGF.EditorTools.Psd2UGUI
 
             var layerName = layer.BindPsdLayer != null ? layer.BindPsdLayer.GetDisplayName() : layer.SourceLayerName;
             TryParseLayerTags(layerName, layer.LayerType, out var parsedInfo, emitWarnings: true);
-            roleType = parsedInfo.RoleType;
 
             if (parsedInfo.MainType != GUIType.Null)
             {
@@ -910,10 +1241,6 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             return result != null;
-        }
-        internal bool TryParse(PsdLayerNode layer, out UGUIParseRule result)
-        {
-            return TryParse(layer, out result, out _);
         }
         internal static bool HasUITypeFlag(string layerName, out string tpFlag)
         {
@@ -968,7 +1295,11 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (uiNode == null || layerNode == null) return;
 
-            var rect = layerNode.LayerRect;
+            ApplyRectTransform(layerNode.LayerRect, uiNode, pos, width, height, extSize);
+        }
+
+        private static void ApplyRectTransform(Rect rect, UnityEngine.Component uiNode, bool pos, bool width, bool height, int extSize)
+        {
             var rectTransform = uiNode.GetComponent<RectTransform>();
 
             // Resize first so rectTransform.rect reports the final dimensions.
@@ -998,6 +1329,85 @@ namespace UGF.EditorTools.Psd2UGUI
                 // Apply the world-space pivot position directly.
                 rectTransform.position = pivotWorldPos;
             }
+        }
+
+        internal static void SetTextRotation(PsdLayerNode layerNode, UnityEngine.Component uiNode)
+        {
+            if (uiNode == null) return;
+
+            var rectTransform = uiNode.GetComponent<RectTransform>();
+            if (rectTransform == null) return;
+
+            rectTransform.localEulerAngles = layerNode != null
+                && layerNode.TryGetTextUnityRotation(out var rotation)
+                ? rotation
+                : Vector3.zero;
+        }
+
+        internal static void SetTextRectTransform(PsdLayerNode layerNode, UnityEngine.Component uiNode)
+        {
+            if (uiNode == null || layerNode == null) return;
+
+            var sourceRect = layerNode.TryGetTextLayoutRect(out var textRect)
+                ? textRect
+                : layerNode.LayerRect;
+            ApplyRectTransform(sourceRect, uiNode, true, true, true, 0);
+        }
+
+        internal static void SetInputFieldTextRectTransform(
+            PsdLayerNode inputLayerNode,
+            PsdLayerNode textLayerNode,
+            UnityEngine.Component uiNode)
+        {
+            if (inputLayerNode == null || textLayerNode == null || uiNode == null) return;
+
+            var inputRect = inputLayerNode.LayerRect;
+            var textRect = textLayerNode.LayerRect;
+            if (inputRect.width <= 0f || textRect.width <= 0f)
+            {
+                SetTextRectTransform(textLayerNode, uiNode);
+                return;
+            }
+
+            float inputLeft = inputRect.position.x - inputRect.width * 0.5f;
+            float inputRight = inputRect.position.x + inputRect.width * 0.5f;
+            float textLeft = textRect.position.x - textRect.width * 0.5f;
+            float textRight = textRect.position.x + textRect.width * 0.5f;
+
+            var justification = textLayerNode.ParseTextLayerInfo(out var textInfo)
+                ? textInfo.Justification
+                : PsdTextJustification.Left;
+            switch (justification)
+            {
+                case PsdTextJustification.Right:
+                case PsdTextJustification.JustifyLastRight:
+                    float rightInset = Mathf.Max(0f, inputRight - textRight);
+                    textLeft = Mathf.Min(textLeft, inputLeft + rightInset);
+                    break;
+                case PsdTextJustification.Center:
+                case PsdTextJustification.JustifyLastCenter:
+                    float halfWidth = Mathf.Min(
+                        textRect.position.x - inputLeft,
+                        inputRight - textRect.position.x);
+                    if (halfWidth > 0f)
+                    {
+                        halfWidth = Mathf.Max(halfWidth, textRect.width * 0.5f);
+                        textLeft = textRect.position.x - halfWidth;
+                        textRight = textRect.position.x + halfWidth;
+                    }
+                    break;
+                default:
+                    float leftInset = Mathf.Max(0f, textLeft - inputLeft);
+                    textRight = Mathf.Max(textRight, inputRight - leftInset);
+                    break;
+            }
+
+            var contentRect = new Rect(
+                (textLeft + textRight) * 0.5f,
+                textRect.position.y,
+                textRight - textLeft,
+                textRect.height);
+            ApplyRectTransform(contentRect, uiNode, true, true, true, 0);
         }
 
         /// <summary>
@@ -1052,24 +1462,17 @@ namespace UGF.EditorTools.Psd2UGUI
             if (layerNode != null)
             {
                 var spAssetName = layerNode.ExportImageAsset(true);
-                var sprite = AssetDatabase.LoadAssetAtPath<Sprite>(spAssetName);
+                var sprite = PsdLayerNode.LoadSpriteAssetAtPath(spAssetName);
                 if (sprite != null)
                 {
                     if (auto9Slice)
                     {
-                        var spImpt = AssetImporter.GetAtPath(spAssetName) as TextureImporter;
-                        var rawReadable = spImpt.isReadable;
-                        if (!rawReadable)
+                        Psd2UIFormConverter.ApplySpriteNineSlice(spAssetName);
+                        if (Psd2UIFormSettings.Instance.AutoCropMinimalNineSlice)
                         {
-                            spImpt.isReadable = true;
-                            spImpt.SaveAndReimport();
+                            RightClickExtension.TryCropMinimalNineSlice(spAssetName);
                         }
-                        if (spImpt.spriteBorder == Vector4.zero)
-                        {
-                            spImpt.spriteBorder = CalculateTexture9SliceBorder(sprite.texture);
-                            spImpt.isReadable = rawReadable;
-                            spImpt.SaveAndReimport();
-                        }
+                        sprite = PsdLayerNode.LoadSpriteAssetAtPath(spAssetName) ?? sprite;
                     }
                     return sprite;
                 }
@@ -1363,16 +1766,20 @@ namespace UGF.EditorTools.Psd2UGUI
             text.gameObject.SetActive(txtLayer != null);
             if (txtLayer != null && txtLayer.ParseTextLayerInfo(out var textInfo))
             {
-                bool isMultiLine = IsLikelyMultiLineText(txtLayer, in textInfo);
                 var tFont = FindFontAsset(textInfo.FontName);
                 if (tFont != null) text.font = tFont;
                 text.text = textInfo.Text;
-                text.fontSize = textInfo.FontSize;
+                text.supportRichText = false;
+                text.fontSize = Mathf.Max(1, Mathf.RoundToInt(textInfo.FontSize));
                 text.fontStyle = textInfo.FontStyle;
                 text.color = textInfo.Color;
                 text.resizeTextForBestFit = false;
                 text.lineSpacing = ConvertPsdLeadingToUGUILineSpacing(text, in textInfo);
-                text.horizontalOverflow = isMultiLine ? HorizontalWrapMode.Wrap : HorizontalWrapMode.Overflow;
+                text.alignment = ConvertPsdAlignment(text.alignment, textInfo.Justification);
+                bool isRotated = txtLayer.TryGetTextUnityRotation(out var rotation)
+                    && Mathf.Abs(rotation.z) > 0.001f;
+                text.alignByGeometry = !textInfo.IsParagraphText && !isRotated;
+                text.horizontalOverflow = textInfo.IsParagraphText ? HorizontalWrapMode.Wrap : HorizontalWrapMode.Overflow;
                 text.verticalOverflow = VerticalWrapMode.Overflow;
                 ApplyUGUITextEffects(text, in textInfo);
                 return textInfo;
@@ -1390,43 +1797,676 @@ namespace UGF.EditorTools.Psd2UGUI
             text.gameObject.SetActive(txtLayer != null);
             if (txtLayer != null && txtLayer.ParseTextLayerInfo(out var textInfo))
             {
-                bool isMultiLine = IsLikelyMultiLineText(txtLayer, in textInfo);
-                var tFont = FindTMPFontAsset(textInfo.FontName) ?? text.font;
+                var runFonts = ResolveTMPFontAssets(text, in textInfo);
+                var tFont = runFonts.Length > 0 ? runFonts[0] : text.font;
                 if (tFont != null)
                 {
                     var fontMaterial = EnsureTMPFontAssetResources(tFont);
-                    EnsureTMPFontHasCharacters(tFont, textInfo.Text);
-                    fontMaterial = EnsureTMPFontAssetResources(tFont) ?? fontMaterial;
                     text.font = tFont;
                     if (fontMaterial != null)
                     {
                         text.fontSharedMaterial = fontMaterial;
                     }
                 }
-                text.text = textInfo.Text ?? string.Empty;
-                text.fontSize = textInfo.FontSize;
-                text.fontStyle = textInfo.TMPFontStyle;
-                text.characterSpacing = textInfo.CharacterSpacing;
-                text.lineSpacing = ConvertPsdLeadingToTMPLineSpacing(text, in textInfo);
-                text.enableAutoSizing = false;
-                text.enableWordWrapping = isMultiLine;
-                text.overflowMode = TextOverflowModes.Overflow;
-                text.margin = Vector4.zero;
-                text.color = HasUsableTMPGradientStops(in textInfo) ? Color.white : textInfo.Color;
-                ApplyTMPTextEffects(text, in textInfo);
-                text.ForceMeshUpdate();
-                ApplyTMPTextGradient(txtLayer, text, in textInfo);
 
-                // TODO: Revisit TMP layout parity after more PSD samples are verified.
+                bool useRichText = RequiresTMPRichText(in textInfo);
+                Vector2 effectSize = txtLayer.LayerRect.size;
+                TMPGradientOutput gradientOutput = ResolveTMPGradientOutput(in textInfo);
+                bool useGradientFill = gradientOutput != TMPGradientOutput.None;
+                text.fontSize = textInfo.FontSize;
+                text.fontStyle = useRichText ? FontStyles.Normal : textInfo.TMPFontStyle;
+                text.characterSpacing = useRichText ? 0f : textInfo.CharacterSpacing;
+                text.lineSpacing = useRichText ? 0f : ConvertPsdLeadingToTMPLineSpacing(text, in textInfo);
+                text.paragraphSpacing = 0f;
+                text.enableKerning = ResolveTMPAutoKerning(in textInfo);
+                text.horizontalAlignment = ConvertPsdAlignment(textInfo.Justification);
+                text.enableAutoSizing = false;
+                SetTMPTextWrapping(text, textInfo.IsParagraphText);
+                text.overflowMode = TextOverflowModes.Overflow;
+                text.margin = ResolveTMPParagraphMargins(in textInfo);
+                text.extraPadding = textInfo.HasOutline || textInfo.HasShadow || textInfo.HasGlow || textInfo.HasBevel;
+                text.color = useRichText || useGradientFill ? Color.white : textInfo.Color;
+                ApplyTMPTextEffects(text, effectSize, in textInfo);
+                var runMaterials = ResolveTMPRunEffectMaterials(runFonts, effectSize, in textInfo);
+                text.richText = useRichText;
+                text.text = useRichText
+                    ? BuildTMPRichText(in textInfo, runFonts, runMaterials, !useGradientFill)
+                    : textInfo.Text ?? string.Empty;
+                ApplyTMPTextGradientMapping(text, effectSize, gradientOutput, in textInfo);
+                text.ForceMeshUpdate();
             }
+        }
+        private static TMP_FontAsset[] ResolveTMPFontAssets(TextMeshProUGUI text, in TextLayerInfo textInfo)
+        {
+            var runs = textInfo.StyleRuns;
+            if (runs == null || runs.Length == 0)
+                return new TMP_FontAsset[0];
+
+            var fonts = new TMP_FontAsset[runs.Length];
+            TMP_FontAsset baseFont = FindTMPFontAsset(runs[0].FontName) ?? text.font;
+            string sourceText = textInfo.Text ?? string.Empty;
+            for (int i = 0; i < runs.Length; i++)
+            {
+                var font = i == 0
+                    ? baseFont
+                    : FindTMPFontAsset(runs[i].FontName) ?? baseFont;
+                font = EnsureTMPEffectFontCapacity(font, runs[i].FontSize, in textInfo) ?? font;
+                if (i == 0)
+                    baseFont = font;
+                if (font != null && baseFont != null && HasSameTMPFontSource(font, baseFont))
+                {
+                    font = baseFont;
+                }
+                else if (font != null && baseFont != null)
+                {
+                    font = EnsureTMPRichTextFontAsset(font) ?? baseFont;
+                }
+                fonts[i] = font;
+                if (font == null)
+                    continue;
+
+                EnsureTMPFontAssetResources(font);
+                int start = Mathf.Clamp(runs[i].Start, 0, sourceText.Length);
+                int length = Mathf.Clamp(runs[i].Length, 0, sourceText.Length - start);
+                if (length > 0)
+                {
+                    EnsureTMPFontHasCharacters(font, sourceText.Substring(start, length));
+                }
+                MaterialReferenceManager.AddFontAsset(font);
+            }
+
+            return fonts;
+        }
+
+        private static Material[] ResolveTMPRunEffectMaterials(
+            TMP_FontAsset[] runFonts,
+            Vector2 effectSize,
+            in TextLayerInfo textInfo)
+        {
+            if (runFonts == null
+                || runFonts.Length == 0
+                || !HasTMPMaterialEffects(in textInfo))
+            {
+                return Array.Empty<Material>();
+            }
+
+            var materials = new Material[runFonts.Length];
+            for (int i = 0; i < runFonts.Length; i++)
+            {
+                var font = runFonts[i];
+                if (font == null)
+                {
+                    continue;
+                }
+
+                var baseMaterial = EnsureTMPFontAssetResources(font);
+                var run = textInfo.StyleRuns[i];
+                materials[i] = GetOrCreateTMPEffectMaterial(
+                    font,
+                    baseMaterial,
+                    run.FontSize,
+                    run.Color,
+                    effectSize,
+                    in textInfo);
+
+                if (i > 0 && materials[i] != null)
+                {
+                    RegisterTMPFontMaterial(materials[i]);
+                }
+            }
+
+            return materials;
+        }
+
+        private static void RegisterTMPFontMaterial(Material material)
+        {
+            int hashCode = TMP_TextUtilities.GetSimpleHashCode(material.name);
+            if (!MaterialReferenceManager.TryGetMaterial(hashCode, out _))
+            {
+                MaterialReferenceManager.AddFontMaterial(hashCode, material);
+            }
+        }
+
+        internal static bool RequiresTMPRichText(in TextLayerInfo textInfo)
+        {
+            string sourceText = textInfo.Text ?? string.Empty;
+            var styleRuns = textInfo.StyleRuns;
+            int baseStyleIndex = -1;
+            if (styleRuns != null && sourceText.Length > 0)
+            {
+                for (int i = 0; i < styleRuns.Length; i++)
+                {
+                    var style = styleRuns[i];
+                    if (!ContainsVisibleCharacters(sourceText, style.Start, style.Length))
+                        continue;
+
+                    if (baseStyleIndex < 0)
+                    {
+                        baseStyleIndex = i;
+                        continue;
+                    }
+
+                    if (!AreTMPRichTextStylesEqual(in styleRuns[baseStyleIndex], in style))
+                        return true;
+                }
+            }
+
+            var paragraphRuns = textInfo.ParagraphRuns;
+            if (paragraphRuns == null || sourceText.Length == 0)
+                return false;
+
+            int baseParagraphIndex = -1;
+            for (int i = 0; i < paragraphRuns.Length; i++)
+            {
+                var paragraph = paragraphRuns[i];
+                if (!OverlapsText(sourceText.Length, paragraph.Start, paragraph.Length))
+                    continue;
+
+                if (baseParagraphIndex < 0)
+                {
+                    baseParagraphIndex = i;
+                    continue;
+                }
+
+                if (!AreTMPRichTextParagraphsEqual(in paragraphRuns[baseParagraphIndex], in paragraph))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool ContainsVisibleCharacters(string text, int start, int length)
+        {
+            int rangeStart = Mathf.Clamp(start, 0, text.Length);
+            int rangeEnd = Mathf.Clamp(start + length, rangeStart, text.Length);
+            for (int i = rangeStart; i < rangeEnd; i++)
+            {
+                char character = text[i];
+                if (character != '\r' && character != '\n')
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool OverlapsText(int textLength, int start, int length)
+        {
+            return length > 0 && start < textLength && start + length > 0;
+        }
+
+        private static bool AreTMPRichTextStylesEqual(
+            in TextStyleRunInfo left,
+            in TextStyleRunInfo right)
+        {
+            return string.Equals(left.FontName, right.FontName, StringComparison.Ordinal)
+                && Mathf.Abs(left.FontSize - right.FontSize) <= 0.001f
+                && left.Color == right.Color
+                && left.TMPFontStyle == right.TMPFontStyle
+                && Mathf.Abs(left.CharacterSpacing - right.CharacterSpacing) <= 0.001f
+                && left.IsAutoLineSpacing == right.IsAutoLineSpacing
+                && (left.IsAutoLineSpacing || Mathf.Abs(left.LineSpacing - right.LineSpacing) <= 0.001f)
+                && Mathf.Abs(left.BaselineShift - right.BaselineShift) <= 0.001f
+                && Mathf.Abs(left.HorizontalScale - right.HorizontalScale) <= 0.001f
+                && left.NoBreak == right.NoBreak;
+        }
+
+        private static bool AreTMPRichTextParagraphsEqual(
+            in TextParagraphRunInfo left,
+            in TextParagraphRunInfo right)
+        {
+            return left.Justification == right.Justification
+                && Mathf.Abs(left.FirstLineIndent - right.FirstLineIndent) <= 0.001f
+                && Mathf.Abs(left.StartIndent - right.StartIndent) <= 0.001f
+                && Mathf.Abs(left.EndIndent - right.EndIndent) <= 0.001f
+                && Mathf.Abs(left.SpaceBefore - right.SpaceBefore) <= 0.001f
+                && Mathf.Abs(left.SpaceAfter - right.SpaceAfter) <= 0.001f;
+        }
+
+        internal static bool ResolveTMPAutoKerning(in TextLayerInfo textInfo)
+        {
+            var runs = textInfo.StyleRuns;
+            if (runs == null || runs.Length == 0)
+                return textInfo.AutoKerning;
+
+            int enabledLength = 0;
+            int disabledLength = 0;
+            for (int i = 0; i < runs.Length; i++)
+            {
+                if (runs[i].AutoKerning)
+                    enabledLength += runs[i].Length;
+                else
+                    disabledLength += runs[i].Length;
+            }
+
+            return enabledLength == disabledLength
+                ? runs[0].AutoKerning
+                : enabledLength > disabledLength;
+        }
+
+        internal static string BuildTMPRichText(
+            in TextLayerInfo textInfo,
+            TMP_FontAsset[] runFonts,
+            Material[] runMaterials,
+            bool emitRunColors)
+        {
+            string sourceText = textInfo.Text ?? string.Empty;
+            if (sourceText.Length == 0)
+                return string.Empty;
+
+            var builder = new StringBuilder(sourceText.Length + (textInfo.StyleRuns.Length * 128));
+            var paragraphRuns = textInfo.ParagraphRuns;
+            int styleIndex = 0;
+            int textOffset = 0;
+            if (paragraphRuns == null || paragraphRuns.Length == 0)
+            {
+                AppendTMPStyledRange(
+                    builder,
+                    sourceText,
+                    in textInfo,
+                    runFonts,
+                    runMaterials,
+                    0,
+                    sourceText.Length,
+                    emitRunColors,
+                    ref styleIndex);
+                return builder.ToString();
+            }
+
+            for (int i = 0; i < paragraphRuns.Length && textOffset < sourceText.Length; i++)
+            {
+                var paragraph = paragraphRuns[i];
+                int paragraphStart = Mathf.Clamp(paragraph.Start, textOffset, sourceText.Length);
+                int paragraphEnd = Mathf.Clamp(paragraph.Start + paragraph.Length, paragraphStart, sourceText.Length);
+                if (paragraphStart > textOffset)
+                {
+                    AppendTMPStyledRange(
+                        builder,
+                        sourceText,
+                        in textInfo,
+                        runFonts,
+                        runMaterials,
+                        textOffset,
+                        paragraphStart,
+                        emitRunColors,
+                        ref styleIndex);
+                }
+
+                bool hasLineHeight = AppendTMPParagraphOpening(
+                    builder,
+                    in textInfo,
+                    in paragraph,
+                    paragraphStart,
+                    paragraphEnd);
+                int lineBreakStart = FindTrailingLineBreakStart(sourceText, paragraphStart, paragraphEnd);
+                AppendTMPStyledRange(
+                    builder,
+                    sourceText,
+                    in textInfo,
+                    runFonts,
+                    runMaterials,
+                    paragraphStart,
+                    lineBreakStart,
+                    emitRunColors,
+                    ref styleIndex);
+                if (lineBreakStart < paragraphEnd)
+                {
+                    float boundarySpacing = paragraph.SpaceAfter;
+                    if (i + 1 < paragraphRuns.Length)
+                    {
+                        boundarySpacing += paragraphRuns[i + 1].SpaceBefore;
+                    }
+
+                    bool hasBoundaryLineHeight = Mathf.Abs(boundarySpacing) > 0.001f;
+                    if (hasBoundaryLineHeight)
+                    {
+                        float lineHeight = CalculateParagraphLineHeight(
+                            in textInfo,
+                            paragraphStart,
+                            paragraphEnd);
+                        builder.Append("<line-height=")
+                            .Append(FormatTMPValue(Mathf.Max(0.01f, lineHeight + boundarySpacing)))
+                            .Append("px>");
+                    }
+
+                    AppendTMPStyledRange(
+                        builder,
+                        sourceText,
+                        in textInfo,
+                        runFonts,
+                        runMaterials,
+                        lineBreakStart,
+                        paragraphEnd,
+                        emitRunColors,
+                        ref styleIndex);
+                    if (hasBoundaryLineHeight)
+                    {
+                        builder.Append("</line-height>");
+                    }
+                }
+                AppendTMPParagraphClosing(builder, in paragraph, hasLineHeight);
+                textOffset = paragraphEnd;
+            }
+
+            if (textOffset < sourceText.Length)
+            {
+                AppendTMPStyledRange(
+                    builder,
+                    sourceText,
+                    in textInfo,
+                    runFonts,
+                    runMaterials,
+                    textOffset,
+                    sourceText.Length,
+                    emitRunColors,
+                    ref styleIndex);
+            }
+            return builder.ToString();
+        }
+
+        private static bool AppendTMPParagraphOpening(
+            StringBuilder builder,
+            in TextLayerInfo textInfo,
+            in TextParagraphRunInfo paragraph,
+            int paragraphStart,
+            int paragraphEnd)
+        {
+            builder.Append("<align=").Append(GetTMPAlignmentTag(paragraph.Justification)).Append('>');
+            if (Mathf.Abs(paragraph.StartIndent) > 0.001f)
+            {
+                builder.Append("<margin-left=").Append(FormatTMPValue(paragraph.StartIndent)).Append("px>");
+            }
+            if (Mathf.Abs(paragraph.EndIndent) > 0.001f)
+            {
+                builder.Append("<margin-right=").Append(FormatTMPValue(paragraph.EndIndent)).Append("px>");
+            }
+            if (Mathf.Abs(paragraph.FirstLineIndent) > 0.001f)
+            {
+                builder.Append("<line-indent=").Append(FormatTMPValue(paragraph.FirstLineIndent)).Append("px>");
+            }
+
+            float lineHeight = CalculateParagraphLineHeight(in textInfo, paragraphStart, paragraphEnd);
+            if (lineHeight > 0f)
+            {
+                builder.Append("<line-height=").Append(FormatTMPValue(lineHeight)).Append("px>");
+                return true;
+            }
+
+            return false;
+        }
+
+        private static void AppendTMPParagraphClosing(
+            StringBuilder builder,
+            in TextParagraphRunInfo paragraph,
+            bool hasLineHeight)
+        {
+            if (hasLineHeight)
+                builder.Append("</line-height>");
+            if (Mathf.Abs(paragraph.FirstLineIndent) > 0.001f)
+                builder.Append("</line-indent>");
+            if (Mathf.Abs(paragraph.StartIndent) > 0.001f || Mathf.Abs(paragraph.EndIndent) > 0.001f)
+                builder.Append("</margin>");
+            builder.Append("</align>");
+        }
+
+        private static int FindTrailingLineBreakStart(string text, int start, int end)
+        {
+            while (end > start && (text[end - 1] == '\r' || text[end - 1] == '\n'))
+            {
+                end--;
+            }
+
+            return end;
+        }
+
+        private static float CalculateParagraphLineHeight(
+            in TextLayerInfo textInfo,
+            int paragraphStart,
+            int paragraphEnd)
+        {
+            float lineHeight = 0f;
+            var runs = textInfo.StyleRuns;
+            for (int i = 0; i < runs.Length; i++)
+            {
+                var run = runs[i];
+                if (run.Start >= paragraphEnd || run.Start + run.Length <= paragraphStart)
+                    continue;
+
+                float runHeight = run.IsAutoLineSpacing
+                    ? run.FontSize * 1.2f
+                    : run.LineSpacing;
+                lineHeight = Mathf.Max(lineHeight, runHeight);
+            }
+            return lineHeight;
+        }
+
+        private static void AppendTMPStyledRange(
+            StringBuilder builder,
+            string sourceText,
+            in TextLayerInfo textInfo,
+            TMP_FontAsset[] runFonts,
+            Material[] runMaterials,
+            int rangeStart,
+            int rangeEnd,
+            bool emitRunColors,
+            ref int styleIndex)
+        {
+            var runs = textInfo.StyleRuns;
+            while (styleIndex < runs.Length && runs[styleIndex].Start + runs[styleIndex].Length <= rangeStart)
+                styleIndex++;
+
+            int offset = rangeStart;
+            while (offset < rangeEnd && styleIndex < runs.Length)
+            {
+                var run = runs[styleIndex];
+                int runStart = Mathf.Max(offset, run.Start);
+                int runEnd = Mathf.Min(rangeEnd, run.Start + run.Length);
+                if (runStart > offset)
+                {
+                    AppendEscapedTMPText(builder, sourceText, offset, runStart - offset);
+                }
+                if (runEnd > runStart)
+                {
+                    var runFont = runFonts[styleIndex];
+                    var runMaterial = runMaterials != null && styleIndex < runMaterials.Length
+                        ? runMaterials[styleIndex]
+                        : null;
+                    bool emitFontTag = runFont != null
+                        && runFonts.Length > 0
+                        && runFont != runFonts[0];
+                    bool emitMaterial = runMaterial != null
+                        && runMaterials.Length > 0
+                        && runMaterial != runMaterials[0];
+                    bool emitStandaloneMaterial = emitMaterial && !emitFontTag;
+                    AppendTMPStyleOpening(
+                        builder,
+                        in run,
+                        runFont,
+                        runMaterial,
+                        emitFontTag,
+                        emitMaterial,
+                        emitStandaloneMaterial,
+                        emitRunColors);
+                    AppendEscapedTMPText(builder, sourceText, runStart, runEnd - runStart);
+                    AppendTMPStyleClosing(builder, in run, emitFontTag, emitStandaloneMaterial, emitRunColors);
+                    offset = runEnd;
+                }
+                if (run.Start + run.Length <= offset)
+                    styleIndex++;
+            }
+
+            if (offset < rangeEnd)
+            {
+                AppendEscapedTMPText(builder, sourceText, offset, rangeEnd - offset);
+            }
+        }
+
+        private static void AppendTMPStyleOpening(
+            StringBuilder builder,
+            in TextStyleRunInfo run,
+            TMP_FontAsset font,
+            Material material,
+            bool emitFontTag,
+            bool emitMaterial,
+            bool emitStandaloneMaterial,
+            bool emitRunColor)
+        {
+            if (emitFontTag)
+            {
+                builder.Append("<font=\"").Append(font.name).Append('"');
+                if (emitMaterial)
+                {
+                    builder.Append(" material=\"").Append(material.name).Append('"');
+                }
+                builder.Append('>');
+            }
+            else if (emitStandaloneMaterial)
+            {
+                builder.Append("<material=\"").Append(material.name).Append("\">");
+            }
+            builder.Append("<size=").Append(FormatTMPValue(run.FontSize)).Append("px>");
+            if (emitRunColor)
+                builder.Append("<color=#").Append(ColorUtility.ToHtmlStringRGBA(run.Color)).Append('>');
+            if (Mathf.Abs(run.CharacterSpacing) > 0.001f)
+            {
+                builder.Append("<cspace=").Append(FormatTMPValue(run.CharacterSpacing * 0.01f)).Append("em>");
+            }
+            if (Mathf.Abs(run.BaselineShift) > 0.001f)
+                builder.Append("<voffset=").Append(FormatTMPValue(run.BaselineShift)).Append("px>");
+            if (Mathf.Abs(run.HorizontalScale - 1f) > 0.001f)
+                builder.Append("<scale=").Append(FormatTMPValue(run.HorizontalScale)).Append('>');
+            if ((run.TMPFontStyle & FontStyles.Bold) != 0) builder.Append("<b>");
+            if ((run.TMPFontStyle & FontStyles.Italic) != 0) builder.Append("<i>");
+            if ((run.TMPFontStyle & FontStyles.Underline) != 0) builder.Append("<u>");
+            if ((run.TMPFontStyle & FontStyles.Strikethrough) != 0) builder.Append("<s>");
+            if (run.Capitalization == PsdTextCapitalization.AllCaps) builder.Append("<uppercase>");
+            else if (run.Capitalization == PsdTextCapitalization.SmallCaps) builder.Append("<smallcaps>");
+            if (run.NoBreak) builder.Append("<nobr>");
+        }
+
+        private static void AppendTMPStyleClosing(
+            StringBuilder builder,
+            in TextStyleRunInfo run,
+            bool emitFontTag,
+            bool emitStandaloneMaterial,
+            bool emitRunColor)
+        {
+            if (run.NoBreak) builder.Append("</nobr>");
+            if (run.Capitalization == PsdTextCapitalization.AllCaps) builder.Append("</uppercase>");
+            else if (run.Capitalization == PsdTextCapitalization.SmallCaps) builder.Append("</smallcaps>");
+            if ((run.TMPFontStyle & FontStyles.Strikethrough) != 0) builder.Append("</s>");
+            if ((run.TMPFontStyle & FontStyles.Underline) != 0) builder.Append("</u>");
+            if ((run.TMPFontStyle & FontStyles.Italic) != 0) builder.Append("</i>");
+            if ((run.TMPFontStyle & FontStyles.Bold) != 0) builder.Append("</b>");
+            if (Mathf.Abs(run.HorizontalScale - 1f) > 0.001f) builder.Append("</scale>");
+            if (Mathf.Abs(run.BaselineShift) > 0.001f) builder.Append("</voffset>");
+            if (Mathf.Abs(run.CharacterSpacing) > 0.001f) builder.Append("</cspace>");
+            if (emitRunColor) builder.Append("</color>");
+            builder.Append("</size>");
+            if (emitStandaloneMaterial) builder.Append("</material>");
+            if (emitFontTag) builder.Append("</font>");
+        }
+
+        private static void AppendEscapedTMPText(
+            StringBuilder builder,
+            string text,
+            int start,
+            int length)
+        {
+            int end = start + length;
+            int chunkStart = start;
+            for (int i = start; i < end; i++)
+            {
+                if (text[i] != '<')
+                    continue;
+
+                if (i > chunkStart)
+                    builder.Append(text, chunkStart, i - chunkStart);
+                builder.Append("<noparse><</noparse>");
+                chunkStart = i + 1;
+            }
+            if (chunkStart < end)
+                builder.Append(text, chunkStart, end - chunkStart);
+        }
+
+        private static string FormatTMPValue(float value)
+        {
+            return value.ToString("0.###", CultureInfo.InvariantCulture);
+        }
+
+        private static string GetTMPAlignmentTag(PsdTextJustification justification)
+        {
+            switch (justification)
+            {
+                case PsdTextJustification.Right:
+                    return "right";
+                case PsdTextJustification.Center:
+                    return "center";
+                case PsdTextJustification.JustifyAll:
+                    return "flush";
+                case PsdTextJustification.JustifyLastLeft:
+                case PsdTextJustification.JustifyLastRight:
+                case PsdTextJustification.JustifyLastCenter:
+                    return "justified";
+                default:
+                    return "left";
+            }
+        }
+
+        private static HorizontalAlignmentOptions ConvertPsdAlignment(PsdTextJustification justification)
+        {
+            switch (justification)
+            {
+                case PsdTextJustification.Right:
+                    return HorizontalAlignmentOptions.Right;
+                case PsdTextJustification.Center:
+                    return HorizontalAlignmentOptions.Center;
+                case PsdTextJustification.JustifyAll:
+                    return HorizontalAlignmentOptions.Flush;
+                case PsdTextJustification.JustifyLastLeft:
+                case PsdTextJustification.JustifyLastRight:
+                case PsdTextJustification.JustifyLastCenter:
+                    return HorizontalAlignmentOptions.Justified;
+                default:
+                    return HorizontalAlignmentOptions.Left;
+            }
+        }
+
+        private static TextAnchor ConvertPsdAlignment(
+            TextAnchor current,
+            PsdTextJustification justification)
+        {
+            int column;
+            switch (justification)
+            {
+                case PsdTextJustification.Right:
+                case PsdTextJustification.JustifyLastRight:
+                    column = 2;
+                    break;
+                case PsdTextJustification.Center:
+                case PsdTextJustification.JustifyLastCenter:
+                    column = 1;
+                    break;
+                default:
+                    column = 0;
+                    break;
+            }
+            return (TextAnchor)(((int)current / 3) * 3 + column);
+        }
+
+        private static Vector4 ResolveTMPParagraphMargins(in TextLayerInfo textInfo)
+        {
+            var runs = textInfo.ParagraphRuns;
+            if (runs == null || runs.Length == 0)
+            {
+                return Vector4.zero;
+            }
+
+            return new Vector4(
+                0f,
+                runs[0].SpaceBefore,
+                0f,
+                runs[runs.Length - 1].SpaceAfter);
         }
         private static float ConvertPsdLeadingToUGUILineSpacing(UnityEngine.UI.Text text, in TextLayerInfo textInfo)
         {
-            if (textInfo.IsAutoLineSpacing || textInfo.LineSpacing <= 0f)
-            {
-                return 1f;
-            }
-
             float baseLineHeight = Mathf.Max(1f, textInfo.FontSize);
             var font = text != null ? text.font : null;
             if (font != null && font.fontSize > 0 && font.lineHeight > 0)
@@ -1434,7 +2474,10 @@ namespace UGF.EditorTools.Psd2UGUI
                 baseLineHeight = font.lineHeight * (textInfo.FontSize / (float)font.fontSize);
             }
 
-            float spacingFactor = textInfo.LineSpacing / Mathf.Max(1f, baseLineHeight);
+            float targetLineHeight = textInfo.IsAutoLineSpacing || textInfo.LineSpacing <= 0f
+                ? textInfo.FontSize * 1.2f
+                : textInfo.LineSpacing;
+            float spacingFactor = targetLineHeight / Mathf.Max(1f, baseLineHeight);
             if (float.IsNaN(spacingFactor) || float.IsInfinity(spacingFactor))
             {
                 return 1f;
@@ -1442,24 +2485,8 @@ namespace UGF.EditorTools.Psd2UGUI
 
             return Mathf.Max(0.01f, spacingFactor);
         }
-        private static bool IsLikelyMultiLineText(PsdLayerNode layerNode, in TextLayerInfo textInfo)
-        {
-            if (layerNode == null) return false;
-            if (!string.IsNullOrEmpty(textInfo.Text) && (textInfo.Text.IndexOf('\n') >= 0 || textInfo.Text.IndexOf('\r') >= 0))
-            {
-                return true;
-            }
-
-            float singleLineHeight = Mathf.Max(textInfo.FontSize * 1.35f, 1f);
-            return layerNode.LayerRect.height > singleLineHeight;
-        }
         private static float ConvertPsdLeadingToTMPLineSpacing(TextMeshProUGUI text, in TextLayerInfo textInfo)
         {
-            if (textInfo.IsAutoLineSpacing || textInfo.LineSpacing <= 0f)
-            {
-                return 0f;
-            }
-
             float fontSize = Mathf.Max(1f, textInfo.FontSize);
             float baseLineHeight = fontSize;
             var font = text != null ? text.font : null;
@@ -1473,7 +2500,10 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
             }
 
-            float additionalSpacing = textInfo.LineSpacing - baseLineHeight;
+            float targetLineHeight = textInfo.IsAutoLineSpacing || textInfo.LineSpacing <= 0f
+                ? fontSize * 1.2f
+                : textInfo.LineSpacing;
+            float additionalSpacing = targetLineHeight - baseLineHeight;
             float spacing = additionalSpacing * 100f / fontSize;
             if (float.IsNaN(spacing) || float.IsInfinity(spacing))
             {
@@ -1526,154 +2556,111 @@ namespace UGF.EditorTools.Psd2UGUI
                 shadow.useGraphicAlpha = true;
             }
         }
-        private static void ApplyTMPTextGradient(PsdLayerNode layerNode, TextMeshProUGUI text, in TextLayerInfo textInfo)
+        private enum TMPGradientOutput
+        {
+            None = 0,
+            Native = 1,
+            Texture = 2,
+        }
+        private static void ApplyTMPTextGradientMapping(
+            TextMeshProUGUI text,
+            Vector2 effectSize,
+            TMPGradientOutput output,
+            in TextLayerInfo textInfo)
         {
             if (text == null)
                 return;
 
-            text.enableVertexGradient = false;
+            bool useNative = output == TMPGradientOutput.Native;
+            bool useTexture = output == TMPGradientOutput.Texture;
+            text.enableVertexGradient = useNative;
             text.colorGradientPreset = null;
-            text.colorGradient = new VertexGradient(textInfo.Color);
-
-            // Always sync a serialized TMP gradient approximation when PSD provides usable stops.
-            // This keeps the result editable in the TMP inspector even when the effect cannot
-            // be reproduced exactly (for example, multi-stop or non-linear Photoshop gradients).
-            if (TryApplyTMPSerializedGradient(text, in textInfo))
+            if (useNative)
             {
-                text.color = Color.white;
-                return;
+                float width = Mathf.Max(1f, Mathf.Abs(effectSize.x));
+                float height = Mathf.Max(1f, Mathf.Abs(effectSize.y));
+                float topT = EvaluateTMPGradientCoordinate(0.5f, 1f, width, height, in textInfo);
+                float bottomT = EvaluateTMPGradientCoordinate(0.5f, 0f, width, height, in textInfo);
+                Color top = CompositeTMPGradient(textInfo.Color, EvaluateTMPGradientColor(topT, in textInfo), in textInfo);
+                Color bottom = CompositeTMPGradient(textInfo.Color, EvaluateTMPGradientColor(bottomT, in textInfo), in textInfo);
+                text.colorGradient = new VertexGradient(top, top, bottom, bottom);
             }
-
-            text.color = textInfo.Color;
+            else
+            {
+                text.colorGradient = new VertexGradient(Color.white);
+            }
+            text.horizontalMapping = useTexture ? TextureMappingOptions.Paragraph : TextureMappingOptions.Character;
+            text.verticalMapping = useTexture ? TextureMappingOptions.Paragraph : TextureMappingOptions.Character;
         }
         private static bool HasUsableTMPGradientStops(in TextLayerInfo textInfo)
         {
             return textInfo.HasGradient && textInfo.GradientStops != null && textInfo.GradientStops.Length >= 2;
         }
-        private static bool TryApplyTMPSerializedGradient(TextMeshProUGUI text, in TextLayerInfo textInfo)
+        private static bool HasTMPMaterialEffects(in TextLayerInfo textInfo)
         {
-            if (text == null || !HasUsableTMPGradientStops(in textInfo))
+            return textInfo.HasOutline
+                || textInfo.HasShadow
+                || textInfo.HasGlow
+                || textInfo.HasBevel
+                || ResolveTMPGradientOutput(in textInfo) == TMPGradientOutput.Texture;
+        }
+        private static TMPGradientOutput ResolveTMPGradientOutput(in TextLayerInfo textInfo)
+        {
+            if (!HasUsableTMPGradientStops(in textInfo))
+                return TMPGradientOutput.None;
+
+            TMPGradientConversionMode mode = Instance != null
+                ? Instance.TMPGradientMode
+                : TMPGradientConversionMode.Auto;
+            if (mode == TMPGradientConversionMode.ExactTexture)
+                return TMPGradientOutput.Texture;
+            if (mode == TMPGradientConversionMode.EditableNative)
+                return TMPGradientOutput.Native;
+            return CanUseNativeTMPGradient(in textInfo)
+                ? TMPGradientOutput.Native
+                : TMPGradientOutput.Texture;
+        }
+        internal static bool CanUseNativeTMPGradient(in TextLayerInfo textInfo)
+        {
+            if (!HasUsableTMPGradientStops(in textInfo)
+                || textInfo.GradientStops.Length != 2
+                || textInfo.GradientDither
+                || !textInfo.GradientAlignWithLayer
+                || Mathf.Abs(textInfo.GradientScale - 1f) > 0.001f
+                || textInfo.GradientOffset.sqrMagnitude > 0.000001f)
             {
                 return false;
             }
 
-            text.enableVertexGradient = true;
-            text.colorGradientPreset = null;
-            text.colorGradient = CreateTMPApproximateVertexGradient(in textInfo);
-            text.color = Color.white;
-            text.havePropertiesChanged = true;
-            text.SetVerticesDirty();
-            text.ForceMeshUpdate();
-            return true;
+            string style = (textInfo.GradientStyleKey ?? string.Empty).Trim();
+            if (style.Length > 0
+                && !string.Equals(style, "Lnr", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(style, "Linear", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string interpolation = (textInfo.GradientInterpolationKey ?? string.Empty).Trim();
+            if (interpolation.Length > 0
+                && !string.Equals(interpolation, "Clsc", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(interpolation, "Classic", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (textInfo.GradientStops[0].Location > 0.0001f
+                || textInfo.GradientStops[1].Location < 0.9999f)
+            {
+                return false;
+            }
+
+            float horizontal = Mathf.Abs(Mathf.Cos(textInfo.GradientAngle * Mathf.Deg2Rad));
+            return horizontal < 0.001f;
         }
-        private static VertexGradient CreateTMPApproximateVertexGradient(in TextLayerInfo textInfo)
-        {
-            Vector2 direction = GetTMPGradientDirection(textInfo.GradientAngle);
-            var corners = new Vector2[4]
-            {
-                new Vector2(-0.5f, 0.5f),
-                new Vector2(0.5f, 0.5f),
-                new Vector2(-0.5f, -0.5f),
-                new Vector2(0.5f, -0.5f)
-            };
-
-            float minDot = float.PositiveInfinity;
-            float maxDot = float.NegativeInfinity;
-            for (int i = 0; i < corners.Length; i++)
-            {
-                float dot = Vector2.Dot(corners[i], direction);
-                if (dot < minDot) minDot = dot;
-                if (dot > maxDot) maxDot = dot;
-            }
-
-            float dotRange = maxDot - minDot;
-            if (Mathf.Abs(dotRange) < 0.0001f)
-            {
-                dotRange = 1f;
-            }
-
-            return new VertexGradient()
-            {
-                topLeft = EvaluateTMPGradientColor(in textInfo, (Vector2.Dot(corners[0], direction) - minDot) / dotRange),
-                topRight = EvaluateTMPGradientColor(in textInfo, (Vector2.Dot(corners[1], direction) - minDot) / dotRange),
-                bottomLeft = EvaluateTMPGradientColor(in textInfo, (Vector2.Dot(corners[2], direction) - minDot) / dotRange),
-                bottomRight = EvaluateTMPGradientColor(in textInfo, (Vector2.Dot(corners[3], direction) - minDot) / dotRange)
-            };
-        }
-        private static Vector2 GetTMPGradientDirection(float angle)
-        {
-            float normalizedAngle = NormalizeTMPGradientAngle(angle);
-            float rad = normalizedAngle * Mathf.Deg2Rad;
-            var direction = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
-            if (direction.sqrMagnitude < 0.0001f)
-            {
-                return Vector2.right;
-            }
-
-            return direction.normalized;
-        }
-        private static float NormalizeTMPGradientAngle(float angle)
-        {
-            if (float.IsNaN(angle) || float.IsInfinity(angle))
-            {
-                return 0f;
-            }
-
-            angle %= 360f;
-            if (angle < 0f)
-            {
-                angle += 360f;
-            }
-
-            return angle;
-        }
-        private static Color32 EvaluateTMPGradientColor(in TextLayerInfo textInfo, float t)
-        {
-            var stops = textInfo.GradientStops;
-            if (stops == null || stops.Length == 0)
-            {
-                return textInfo.Color;
-            }
-
-            if (float.IsNaN(t) || float.IsInfinity(t))
-            {
-                t = 0f;
-            }
-            t = Mathf.Clamp01(t);
-            if (textInfo.GradientReverse)
-            {
-                t = 1f - t;
-            }
-
-            if (t <= stops[0].Location)
-            {
-                return stops[0].Color;
-            }
-            if (t >= stops[stops.Length - 1].Location)
-            {
-                return stops[stops.Length - 1].Color;
-            }
-
-            for (int i = 0; i < stops.Length - 1; i++)
-            {
-                var current = stops[i];
-                var next = stops[i + 1];
-                if (t <= next.Location)
-                {
-                    float range = next.Location - current.Location;
-                    if (range <= 0.0001f)
-                    {
-                        return next.Color;
-                    }
-
-                    float localT = Mathf.InverseLerp(current.Location, next.Location, t);
-                    return Color.Lerp(current.Color, next.Color, localT);
-                }
-            }
-
-            return stops[stops.Length - 1].Color;
-        }
-        private static void ApplyTMPTextEffects(TextMeshProUGUI text, in TextLayerInfo textInfo)
+        private static void ApplyTMPTextEffects(
+            TextMeshProUGUI text,
+            Vector2 effectSize,
+            in TextLayerInfo textInfo)
         {
             if (text == null) return;
             RemoveLegacyTextEffects(text);
@@ -1684,7 +2671,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 return;
             }
 
-            if (!textInfo.HasOutline && !textInfo.HasShadow && !textInfo.HasGlow && !textInfo.HasBevel)
+            if (!HasTMPMaterialEffects(in textInfo))
             {
                 if (text.fontSharedMaterial != baseMaterial)
                 {
@@ -1695,7 +2682,13 @@ namespace UGF.EditorTools.Psd2UGUI
                 return;
             }
 
-            var effectMaterial = GetOrCreateTMPEffectMaterial(text.font, baseMaterial, text.fontSize, in textInfo);
+            var effectMaterial = GetOrCreateTMPEffectMaterial(
+                text.font,
+                baseMaterial,
+                text.fontSize,
+                textInfo.Color,
+                effectSize,
+                in textInfo);
             if (effectMaterial != null && text.fontSharedMaterial != effectMaterial)
             {
                 text.fontSharedMaterial = effectMaterial;
@@ -1708,7 +2701,7 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             var current = text.fontSharedMaterial;
             var fontMaterial = text.font != null ? EnsureTMPFontAssetResources(text.font) : null;
-            if (current != null && tmpEffectMaterialBaseLookup.TryGetValue(current.GetInstanceID(), out var baseMaterial) && baseMaterial != null)
+            if (current != null && tmpEffectMaterialBaseLookup.TryGetValue(GetObjectId(current), out var baseMaterial) && baseMaterial != null)
             {
                 if (fontMaterial != null && HasSameTMPAtlas(baseMaterial, fontMaterial))
                 {
@@ -1727,9 +2720,15 @@ namespace UGF.EditorTools.Psd2UGUI
             var texA = a.GetTexture(ShaderUtilities.ID_MainTex);
             var texB = b.GetTexture(ShaderUtilities.ID_MainTex);
             if (texA == null || texB == null) return false;
-            return texA.GetInstanceID() == texB.GetInstanceID();
+            return GetObjectId(texA) == GetObjectId(texB);
         }
-        private static Material GetOrCreateTMPEffectMaterial(TMP_FontAsset fontAsset, Material baseMaterial, float fontSize, in TextLayerInfo textInfo)
+        private static Material GetOrCreateTMPEffectMaterial(
+            TMP_FontAsset fontAsset,
+            Material baseMaterial,
+            float fontSize,
+            Color baseColor,
+            Vector2 effectSize,
+            in TextLayerInfo textInfo)
         {
             if (fontAsset != null)
             {
@@ -1744,98 +2743,141 @@ namespace UGF.EditorTools.Psd2UGUI
             ShaderUtilities.GetShaderPropertyIDs();
 
             float gradientScale = GetTMPMaterialGradientScale(baseMaterial);
-            float normalizedOutlineSize = textInfo.HasOutline ? Mathf.Clamp01(textInfo.TMPOutlineSize / gradientScale) : 0f;
-            float outlineWidth = normalizedOutlineSize * TmpOutlineThicknessScale;
-            float faceDilate = 0f;
-            if (textInfo.HasOutline)
-            {
-                switch (textInfo.TMPOutlinePosition)
-                {
-                    case TextLayerInfo.TMPOutlineMode.Inside:
-                        faceDilate = 0f;
-                        break;
-                    case TextLayerInfo.TMPOutlineMode.Center:
-                        faceDilate = normalizedOutlineSize * 0.5f;
-                        break;
-                    case TextLayerInfo.TMPOutlineMode.Outside:
-                        faceDilate = normalizedOutlineSize;
-                        break;
-                    default:
-                        faceDilate = normalizedOutlineSize * 0.5f;
-                        break;
-                }
-            }
-            float outlineSoftness = 0f;
+            float atlasPointSize = fontAsset != null && fontAsset.faceInfo.pointSize > 0f
+                ? fontAsset.faceInfo.pointSize
+                : fontSize;
+            float renderedFontScale = Mathf.Max(0.01f, fontSize / atlasPointSize);
+            float effectPixelRange = gradientScale * renderedFontScale;
+            // Photoshop effects live in screen-pixel distance space. In TMP the same
+            // distance is property * ScaleRatio * GradientScale * renderedFontScale.
+            float faceSoftness = 0f;
+            SolveTMPOutlineProperties(
+                baseMaterial,
+                effectPixelRange,
+                textInfo.HasOutline ? textInfo.TMPOutlineSize : 0f,
+                textInfo.TMPOutlinePosition,
+                out float outlineWidth,
+                out float faceDilate);
+            float outlineFaceDilate = faceDilate;
             float shadowOffsetX = 0f;
             float shadowOffsetY = 0f;
             float shadowDilate = 0f;
             float shadowSoftness = 0f;
             bool shadowIsInner = textInfo.HasShadow && textInfo.ShadowIsInner;
+            TextGlowEffectInfo outerGlow = textInfo.OuterGlow;
+            TextGlowEffectInfo innerGlow = textInfo.InnerGlow;
+            TMPTextGlowSolution glowSolution = TMPTextEffectParameterSolver.Solve(
+                baseColor,
+                effectPixelRange,
+                in outerGlow,
+                in innerGlow,
+                !textInfo.HasShadow);
+            bool usesInnerGlowComposite = glowSolution.HasInnerGlowComposite;
+            bool glowUsesUnderlay = glowSolution.HasUnderlayGlow;
+            bool hasUnderlay = textInfo.HasShadow || glowUsesUnderlay || usesInnerGlowComposite;
+            bool underlayIsInner = textInfo.HasShadow && shadowIsInner;
+            Color underlayColor = textInfo.HasShadow
+                ? textInfo.ShadowColor
+                : usesInnerGlowComposite
+                    ? glowSolution.InnerGlowComposite.UnderlayColor
+                    : glowSolution.UnderlayGlow.MaterialColor;
             if (textInfo.HasShadow)
             {
-                float desiredShadowOffsetX = Mathf.Clamp(textInfo.ShadowOffset.x / gradientScale, -1f, 1f);
-                float desiredShadowOffsetY = Mathf.Clamp(textInfo.ShadowOffset.y / gradientScale, -1f, 1f);
-                float shadowSpread = Mathf.Clamp01(textInfo.ShadowSpread);
-                float normalizedShadowSize = Mathf.Clamp01(textInfo.ShadowSoftness / gradientScale);
-                float desiredShadowDilateMagnitude = Mathf.Clamp01(normalizedShadowSize * shadowSpread);
-                float desiredShadowDilate = shadowIsInner ? -desiredShadowDilateMagnitude : desiredShadowDilateMagnitude;
-                float desiredShadowSoftness = Mathf.Clamp01(normalizedShadowSize - desiredShadowDilateMagnitude);
-                float underlayBudget = GetTMPAvailableEffectBudget(baseMaterial, faceDilate);
-
-                if (shadowIsInner)
-                {
-                    desiredShadowOffsetX = -desiredShadowOffsetX;
-                    desiredShadowOffsetY = -desiredShadowOffsetY;
-                }
-
-                FitTMPUnderlayToBudget(underlayBudget, ref desiredShadowOffsetX, ref desiredShadowOffsetY, ref desiredShadowDilate, ref desiredShadowSoftness, shadowIsInner);
-
-                shadowOffsetX = NormalizeTMPBudgetedValue(desiredShadowOffsetX, underlayBudget);
-                shadowOffsetY = NormalizeTMPBudgetedValue(desiredShadowOffsetY, underlayBudget);
-                shadowDilate = NormalizeTMPBudgetedValue(desiredShadowDilate, underlayBudget);
-                shadowSoftness = NormalizeTMPBudgetedValue(desiredShadowSoftness, underlayBudget);
+                float solidPixels = textInfo.ShadowSoftness * Mathf.Clamp01(textInfo.ShadowSpread);
+                float falloffPixels = Mathf.Max(0f, textInfo.ShadowSoftness - solidPixels);
+                Vector2 offset = shadowIsInner ? -textInfo.ShadowOffset : textInfo.ShadowOffset;
+                float dilatePixels = (shadowIsInner ? -1f : 1f) * 2f * solidPixels;
+                float softnessPixels = Mathf.Max(0f, 2f * falloffPixels - 1f);
+                SolveTMPUnderlayProperties(
+                    baseMaterial,
+                    faceDilate,
+                    outlineWidth,
+                    faceSoftness,
+                    effectPixelRange,
+                    offset,
+                    dilatePixels,
+                    softnessPixels,
+                    out shadowOffsetX,
+                    out shadowOffsetY,
+                    out shadowDilate,
+                    out shadowSoftness);
+            }
+            else if (usesInnerGlowComposite)
+            {
+                SolveTMPInnerGlowCompositeProperties(
+                    baseMaterial,
+                    outlineWidth,
+                    outlineFaceDilate,
+                    effectPixelRange,
+                    in innerGlow,
+                    in glowSolution.InnerGlowComposite,
+                    out faceDilate,
+                    out faceSoftness,
+                    out shadowDilate,
+                    out shadowSoftness);
+            }
+            else if (glowUsesUnderlay)
+            {
+                TMPTextGlowFit underlayFit = glowSolution.UnderlayGlow;
+                SolveTMPUnderlayProperties(
+                    baseMaterial,
+                    faceDilate,
+                    outlineWidth,
+                    faceSoftness,
+                    effectPixelRange,
+                    Vector2.zero,
+                    underlayFit.UnderlayDilatePixels,
+                    underlayFit.UnderlaySoftnessPixels,
+                    out shadowOffsetX,
+                    out shadowOffsetY,
+                    out shadowDilate,
+                    out shadowSoftness);
             }
             float glowInner = 0f;
             float glowOuter = 0f;
             float glowOffset = 0f;
             float glowPower = 0f;
-            Color tmpGlowColor = textInfo.GlowColor;
-            if (textInfo.HasGlow)
+            TMPTextGlowFit shaderGlow = glowSolution.ShaderGlow;
+            Color tmpGlowColor = shaderGlow.MaterialColor;
+            bool hasShaderGlow = glowSolution.HasShaderGlow;
+            bool shaderGlowIsInner = hasShaderGlow && shaderGlow.IsInner;
+            if (hasShaderGlow)
             {
-                float glowSize = Mathf.Clamp01(textInfo.GlowSize / gradientScale);
-                float glowSpread = Mathf.Clamp01(textInfo.GlowSpread);
-                float baseGlowPower = Mathf.Clamp01(textInfo.GlowPower > 0f ? textInfo.GlowPower : TmpDefaultGlowPower);
-
-                if (textInfo.GlowIsInner)
-                {
-                    float innerGlowBasePower = Mathf.Clamp01(baseGlowPower * 0.1f);
-                    glowInner = glowSize;
-                    glowOuter = 0f;
-                    glowOffset = 0f;
-                    glowPower = Mathf.Lerp(innerGlowBasePower, Mathf.Min(1f, innerGlowBasePower * 2f), glowSpread);
-                }
-                else
-                {
-                    glowInner = 0f;
-                    // TMP glow outer radius needs a larger scale factor than PSD size to
-                    // visually match Photoshop outer glow on text. Empirically, a PSD size
-                    // of 5px with 0 spread should land close to TMP Outer = 1.
-                    glowOuter = Mathf.Clamp01(glowSize * Mathf.Lerp(2f, 1.35f, glowSpread));
-                    glowOffset = 0f;
-                    // Lower TMP glow power produces the softer, fuller falloff that matches
-                    // Photoshop outer glow better. Higher spread should tighten the falloff.
-                    glowPower = Mathf.Lerp(0.2f, 0.45f, glowSpread);
-                }
+                glowPower = shaderGlow.GlowPower;
+                glowInner = shaderGlow.IsInner
+                    ? Mathf.Clamp01(2f * shaderGlow.GlowKernelPixels / Mathf.Max(0.01f, effectPixelRange))
+                    : 0f;
+                SolveTMPGlowProperties(
+                    baseMaterial,
+                    faceDilate,
+                    outlineWidth,
+                    faceSoftness,
+                    effectPixelRange,
+                    shaderGlow.GlowOffsetPixels,
+                    shaderGlow.IsInner ? 0f : shaderGlow.GlowKernelPixels,
+                    out glowOffset,
+                    out glowOuter);
             }
-            float normalizedBevelSize = textInfo.HasBevel ? Mathf.Clamp01(textInfo.BevelSize / gradientScale) : 0f;
-            float bevelSoftnessRatio = textInfo.HasBevel && textInfo.BevelSize > 0f ? Mathf.Clamp01(textInfo.BevelSoften / textInfo.BevelSize) : 0f;
-            float targetBevelWidth = textInfo.HasBevel ? Mathf.Clamp(normalizedBevelSize * Mathf.Lerp(TmpBevelWidthScale, TmpBevelWidthScale * 0.75f, bevelSoftnessRatio), 0f, 0.5f) : 0f;
-            float bevelWidth = textInfo.HasBevel ? Mathf.Clamp(targetBevelWidth - outlineWidth * Mathf.Lerp(1f, 0.65f, bevelSoftnessRatio), -0.5f, 0.5f) : 0f;
-            float bevelAmount = textInfo.HasBevel ? (textInfo.BevelDepth > 1f ? Mathf.Clamp01(textInfo.BevelDepth / 100f) : Mathf.Clamp01(textInfo.BevelDepth)) * Mathf.Lerp(1f, 0.82f, bevelSoftnessRatio) : 0f;
-            float bevelOffset = textInfo.HasBevel ? Mathf.Clamp((textInfo.BevelIsInner ? -1f : 1f) * normalizedBevelSize * Mathf.Lerp(0.12f, 0.04f, bevelSoftnessRatio), -0.5f, 0.5f) : 0f;
-            float bevelClamp = textInfo.HasBevel ? Mathf.Clamp01(bevelSoftnessRatio * Mathf.Lerp(0.45f, 0.75f, normalizedBevelSize)) : 0f;
-            float bevelRoundness = textInfo.HasBevel ? Mathf.Lerp(0.08f, 0.92f, bevelSoftnessRatio) : 0f;
+            float bevelSize = textInfo.HasBevel ? Mathf.Max(0f, textInfo.BevelSize) : 0f;
+            float bevelSoften = textInfo.HasBevel ? Mathf.Max(0f, textInfo.BevelSoften) : 0f;
+            // Independent smoothing kernels add in quadrature. This preserves bevel
+            // support while reducing slope by the same geometric ratio.
+            float effectiveBevelSize = Mathf.Sqrt(bevelSize * bevelSize + bevelSoften * bevelSoften);
+            float bevelSlopeAttenuation = effectiveBevelSize > 0.0001f ? bevelSize / effectiveBevelSize : 0f;
+            float bevelWidth = textInfo.HasBevel
+                ? Mathf.Clamp(effectiveBevelSize / Mathf.Max(0.01f, effectPixelRange) - outlineWidth, -0.5f, 0.5f)
+                : 0f;
+            // GetSurfaceNormal produces a maximum tangent slope of 2 * _Bevel.
+            // Photoshop Depth describes that slope; Altitude belongs to lighting,
+            // not to the height field, and is fitted below against TMP's fixed 45° light.
+            float bevelSurfaceSlope = Mathf.Min(2f, Mathf.Max(0f, textInfo.BevelDepth) * bevelSlopeAttenuation);
+            float bevelAmount = textInfo.HasBevel ? Mathf.Clamp01(0.5f * bevelSurfaceSlope) : 0f;
+            float bevelOffset = 0f;
+            float bevelClamp = 0f;
+            float bevelRoundness = textInfo.HasBevel && IsPSDSmoothBevelTechnique(textInfo.BevelTechniqueKey) ? 1f : 0f;
             float lightAngle = textInfo.HasBevel ? ConvertPSDBevelAngleToTMPLightAngle(textInfo.BevelAngle) : 0f;
+            if (textInfo.HasBevel && !IsPSDBevelDirectionDown(textInfo.BevelDirectionKey))
+                lightAngle = Mathf.Repeat(lightAngle + Mathf.PI, Mathf.PI * 2f);
             float bevelShaderFlags = textInfo.HasBevel && !textInfo.BevelIsInner ? 1f : 0f;
             Color bevelSpecularColor = Color.clear;
             Color bevelReflectFaceColor = Color.black;
@@ -1846,47 +2888,34 @@ namespace UGF.EditorTools.Psd2UGUI
             float bevelAmbient = 1f;
             if (textInfo.HasBevel)
             {
-                float altitude = Mathf.Clamp01(textInfo.BevelAltitude / 90f);
-                float highlightOpacity = Mathf.Clamp01(textInfo.BevelHighlightOpacity);
-                float shadowOpacity = Mathf.Clamp01(textInfo.BevelShadowOpacity);
-                float shadowStrength = shadowOpacity * (1f - GetColorLuminance(textInfo.BevelShadowColor));
-                float highlightStrength = highlightOpacity * Mathf.Lerp(0.65f, 1f, bevelAmount);
-
-                float specularStrength = Mathf.Clamp01(Mathf.Lerp(0.35f, 1f, shadowStrength));
-                bevelSpecularColor = new Color(
-                    textInfo.BevelShadowColor.r * specularStrength,
-                    textInfo.BevelShadowColor.g * specularStrength,
-                    textInfo.BevelShadowColor.b * specularStrength,
-                    1f);
-                float reflectionStrength = Mathf.Clamp01(Mathf.Lerp(0.22f, 0.72f, highlightStrength) * Mathf.Lerp(0.85f, 1.05f, altitude));
-                bevelReflectFaceColor = new Color(
-                    textInfo.BevelHighlightColor.r * reflectionStrength,
-                    textInfo.BevelHighlightColor.g * reflectionStrength,
-                    textInfo.BevelHighlightColor.b * reflectionStrength,
-                    1f);
-                Color outlineReflectionSource = textInfo.HasOutline
-                    ? Color.Lerp(textInfo.OutlineColor, textInfo.BevelHighlightColor, 0.65f)
-                    : textInfo.BevelHighlightColor;
-                float outlineReflectionStrength = Mathf.Clamp01(reflectionStrength * (textInfo.HasOutline ? 1f : 0.9f));
-                bevelReflectOutlineColor = new Color(
-                    outlineReflectionSource.r * outlineReflectionStrength,
-                    outlineReflectionSource.g * outlineReflectionStrength,
-                    outlineReflectionSource.b * outlineReflectionStrength,
-                    1f);
-                bevelSpecularPower = highlightStrength > 0f ? Mathf.Clamp(Mathf.Lerp(0.2f, 2.2f, highlightStrength) * Mathf.Lerp(0.8f, 1.1f, altitude), 0f, 4f) : 0f;
-                bevelReflectivity = Mathf.Lerp(14f, 6f, Mathf.Clamp01(bevelRoundness + (1f - altitude) * 0.25f));
-                bevelDiffuse = shadowStrength > 0f ? Mathf.Clamp01(Mathf.Lerp(0.15f, 0.8f, shadowStrength) * Mathf.Lerp(1.1f, 0.75f, altitude)) : 0f;
-                bevelAmbient = shadowStrength > 0f ? Mathf.Clamp01(1f - shadowStrength * Mathf.Lerp(0.75f, 0.45f, altitude)) : 1f;
+                bevelSpecularColor = CompensateTMPAdditiveEffectColor(
+                    baseColor,
+                    new Color(textInfo.BevelHighlightColor.r, textInfo.BevelHighlightColor.g, textInfo.BevelHighlightColor.b, 1f),
+                    textInfo.BevelHighlightBlendModeKey);
+                FitTMPBevelMaterial(
+                    baseColor,
+                    bevelSurfaceSlope,
+                    textInfo.BevelAltitude,
+                    bevelSpecularColor,
+                    textInfo.BevelHighlightOpacity,
+                    textInfo.BevelShadowColor,
+                    textInfo.BevelShadowOpacity,
+                    textInfo.BevelShadowBlendModeKey,
+                    textInfo.BevelGlossContour,
+                    out bevelAmbient,
+                    out bevelDiffuse,
+                    out bevelReflectivity,
+                    out bevelSpecularPower);
             }
             Color32 outlineColor = textInfo.OutlineColor;
-            Color32 shadowColor = textInfo.ShadowColor;
+            Color32 shadowColor = underlayColor;
             Color32 glowColor = tmpGlowColor;
 
             int ow = Mathf.RoundToInt(outlineWidth * 10000f);
             int fd = Mathf.RoundToInt(faceDilate * 10000f);
             int sx = Mathf.RoundToInt(shadowOffsetX * 10000f);
             int sy = Mathf.RoundToInt(shadowOffsetY * 10000f);
-            int od = Mathf.RoundToInt(outlineSoftness * 10000f);
+            int od = Mathf.RoundToInt(faceSoftness * 10000f);
             int sd = Mathf.RoundToInt(shadowDilate * 10000f);
             int ss = Mathf.RoundToInt(shadowSoftness * 10000f);
             int go = Mathf.RoundToInt(glowOuter * 10000f);
@@ -1905,12 +2934,20 @@ namespace UGF.EditorTools.Psd2UGUI
             int bdf = Mathf.RoundToInt(bevelDiffuse * 10000f);
             int bam = Mathf.RoundToInt(bevelAmbient * 10000f);
             int bf = Mathf.RoundToInt(bevelShaderFlags * 10000f);
+            bool hasGradient = ResolveTMPGradientOutput(in textInfo) == TMPGradientOutput.Texture;
+            string gradientSignature = hasGradient
+                ? BuildTMPGradientSignature(baseColor, effectSize, in textInfo)
+                : "0";
+            Texture2D gradientTexture = hasGradient
+                ? GetOrCreateTMPGradientTexture(fontAsset, gradientSignature, baseColor, effectSize, in textInfo)
+                : null;
             string effectSignature =
                 $"o:{(textInfo.HasOutline ? 1 : 0)}|op:{(int)textInfo.TMPOutlinePosition}|ow:{ow}|fd:{fd}|os:{od}|oc:{outlineColor.r},{outlineColor.g},{outlineColor.b},{outlineColor.a}" +
-                $"|s:{(textInfo.HasShadow ? 1 : 0)}|si:{(shadowIsInner ? 1 : 0)}|so:{sx},{sy}|sd:{sd}|ss:{ss}|sc:{shadowColor.r},{shadowColor.g},{shadowColor.b},{shadowColor.a}" +
-                $"|g:{(textInfo.HasGlow ? 1 : 0)}|gi:{(textInfo.GlowIsInner ? 1 : 0)}|go:{go}|giw:{gi}|gof:{gOfs}|gp:{gp}|gc:{glowColor.r},{glowColor.g},{glowColor.b},{glowColor.a}" +
-                $"|b:{(textInfo.HasBevel ? 1 : 0)}|bi:{(textInfo.BevelIsInner ? 1 : 0)}|ba:{ba}|bo:{bo}|bw:{bw}|bc:{bc}|br:{br}|la:{la}|bsc:{bevelSpecularColor32.r},{bevelSpecularColor32.g},{bevelSpecularColor32.b},{bevelSpecularColor32.a}|bsp:{bsp}|brv:{brv}|bdf:{bdf}|bam:{bam}|bf:{bf}";
-            string key = $"{(fontAsset != null ? fontAsset.GetInstanceID() : 0)}|{effectSignature}";
+                $"|s:{(hasUnderlay ? 1 : 0)}|sg:{(glowUsesUnderlay ? 1 : 0)}|si:{(underlayIsInner ? 1 : 0)}|so:{sx},{sy}|sd:{sd}|ss:{ss}|sc:{shadowColor.r},{shadowColor.g},{shadowColor.b},{shadowColor.a}" +
+                $"|g:{(hasShaderGlow ? 1 : 0)}|gi:{(shaderGlowIsInner ? 1 : 0)}|go:{go}|giw:{gi}|gof:{gOfs}|gp:{gp}|gc:{glowColor.r},{glowColor.g},{glowColor.b},{glowColor.a}" +
+                $"|b:{(textInfo.HasBevel ? 1 : 0)}|bi:{(textInfo.BevelIsInner ? 1 : 0)}|ba:{ba}|bo:{bo}|bw:{bw}|bc:{bc}|br:{br}|la:{la}|bsc:{bevelSpecularColor32.r},{bevelSpecularColor32.g},{bevelSpecularColor32.b},{bevelSpecularColor32.a}|bsp:{bsp}|brv:{brv}|bdf:{bdf}|bam:{bam}|bf:{bf}" +
+                $"|f:{gradientSignature}";
+            string key = $"{GetObjectIdKey(fontAsset)}|{effectSignature}";
 
             if (tmpEffectMaterialCache.TryGetValue(key, out var cachedMaterial) && cachedMaterial != null)
             {
@@ -1923,15 +2960,15 @@ namespace UGF.EditorTools.Psd2UGUI
             if (materialAsset != null)
             {
                 EnsureTMPMaterialHasAtlas(materialAsset, fontAsset);
-                ApplyTMPEffectMaterialProperties(materialAsset, outlineWidth, faceDilate, outlineSoftness, outlineColor, textInfo.HasOutline,
-                    shadowOffsetX, shadowOffsetY, shadowDilate, shadowSoftness, shadowColor, textInfo.HasShadow, shadowIsInner,
-                    glowColor, glowOffset, glowInner, glowOuter, glowPower, textInfo.HasGlow,
+                ApplyTMPEffectMaterialProperties(materialAsset, outlineWidth, faceDilate, faceSoftness, outlineColor, textInfo.HasOutline,
+                    shadowOffsetX, shadowOffsetY, shadowDilate, shadowSoftness, shadowColor, hasUnderlay, underlayIsInner,
+                    glowColor, glowOffset, glowInner, glowOuter, glowPower, hasShaderGlow,
                     bevelAmount, bevelOffset, bevelWidth, bevelClamp, bevelRoundness, lightAngle,
                     bevelSpecularColor, bevelReflectFaceColor, bevelReflectOutlineColor, bevelSpecularPower, bevelReflectivity, bevelDiffuse, bevelAmbient,
-                    bevelShaderFlags, textInfo.HasBevel);
+                    bevelShaderFlags, textInfo.HasBevel, gradientTexture, hasGradient);
                 EditorUtility.SetDirty(materialAsset);
                 tmpEffectMaterialCache[key] = materialAsset;
-                tmpEffectMaterialBaseLookup[materialAsset.GetInstanceID()] = baseMaterial;
+                tmpEffectMaterialBaseLookup[GetObjectId(materialAsset)] = baseMaterial;
                 return materialAsset;
             }
 
@@ -1942,12 +2979,12 @@ namespace UGF.EditorTools.Psd2UGUI
             }
             mat.name = materialName;
             EnsureTMPMaterialHasAtlas(mat, fontAsset);
-            ApplyTMPEffectMaterialProperties(mat, outlineWidth, faceDilate, outlineSoftness, outlineColor, textInfo.HasOutline,
-                shadowOffsetX, shadowOffsetY, shadowDilate, shadowSoftness, shadowColor, textInfo.HasShadow, shadowIsInner,
-                glowColor, glowOffset, glowInner, glowOuter, glowPower, textInfo.HasGlow,
+            ApplyTMPEffectMaterialProperties(mat, outlineWidth, faceDilate, faceSoftness, outlineColor, textInfo.HasOutline,
+                shadowOffsetX, shadowOffsetY, shadowDilate, shadowSoftness, shadowColor, hasUnderlay, underlayIsInner,
+                glowColor, glowOffset, glowInner, glowOuter, glowPower, hasShaderGlow,
                 bevelAmount, bevelOffset, bevelWidth, bevelClamp, bevelRoundness, lightAngle,
                 bevelSpecularColor, bevelReflectFaceColor, bevelReflectOutlineColor, bevelSpecularPower, bevelReflectivity, bevelDiffuse, bevelAmbient,
-                bevelShaderFlags, textInfo.HasBevel);
+                bevelShaderFlags, textInfo.HasBevel, gradientTexture, hasGradient);
 
             if (fontAsset != null)
             {
@@ -1955,7 +2992,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             tmpEffectMaterialCache[key] = mat;
-            tmpEffectMaterialBaseLookup[mat.GetInstanceID()] = baseMaterial;
+            tmpEffectMaterialBaseLookup[GetObjectId(mat)] = baseMaterial;
             return mat;
         }
         private static float GetTMPMaterialGradientScale(Material mat)
@@ -1967,32 +3004,308 @@ namespace UGF.EditorTools.Psd2UGUI
 
             return Mathf.Max(1f, mat.GetFloat(ShaderUtilities.ID_GradientScale));
         }
-        private static float GetTMPMaterialWeight(Material mat)
+        private static float GetTMPMaterialScaleRatio(Material mat, int propertyId)
         {
-            if (mat == null)
+            return mat != null && mat.HasProperty(propertyId)
+                ? Mathf.Max(0.0001f, mat.GetFloat(propertyId))
+                : 1f;
+        }
+        private static void SolveTMPOutlineProperties(
+            Material baseMaterial,
+            float effectPixelRange,
+            float targetPixels,
+            TextLayerInfo.TMPOutlineMode position,
+            out float outlineWidth,
+            out float faceDilate)
+        {
+            var probe = new Material(baseMaterial) { hideFlags = HideFlags.HideAndDontSave };
+            float positionFactor = position == TextLayerInfo.TMPOutlineMode.Inside
+                ? -1f
+                : position == TextLayerInfo.TMPOutlineMode.Outside ? 1f : 0f;
+            float low = 0f;
+            float high = 1f;
+            targetPixels = Mathf.Max(0f, targetPixels);
+            for (int i = 0; i < 24; i++)
             {
-                return 0f;
+                float candidate = (low + high) * 0.5f;
+                float effectivePixels = EvaluateTMPOutlinePixels(
+                    probe,
+                    candidate,
+                    positionFactor,
+                    effectPixelRange);
+                if (effectivePixels < targetPixels)
+                    low = candidate;
+                else
+                    high = candidate;
             }
 
-            float normalWeight = mat.HasProperty(ShaderUtilities.ID_WeightNormal) ? mat.GetFloat(ShaderUtilities.ID_WeightNormal) : 0f;
-            float boldWeight = mat.HasProperty(ShaderUtilities.ID_WeightBold) ? mat.GetFloat(ShaderUtilities.ID_WeightBold) : 0f;
-            return Mathf.Max(normalWeight, boldWeight) / 4f;
+            outlineWidth = targetPixels > 0f ? (low + high) * 0.5f : 0f;
+            faceDilate = outlineWidth * positionFactor;
+            UnityEngine.Object.DestroyImmediate(probe);
         }
-        private static float GetTMPAvailableEffectBudget(Material mat, float faceDilate)
+        private static float EvaluateTMPOutlinePixels(
+            Material probe,
+            float outlineWidth,
+            float positionFactor,
+            float effectPixelRange)
         {
-            if (mat == null || !mat.HasProperty(ShaderUtilities.ID_GradientScale))
+            SetTMPPrimaryProperties(probe, outlineWidth * positionFactor, outlineWidth, 0f);
+            ShaderUtilities.UpdateShaderRatios(probe);
+            float ratio = GetTMPMaterialScaleRatio(probe, ShaderUtilities.ID_ScaleRatio_A);
+            return outlineWidth * ratio * effectPixelRange;
+        }
+        private static void SetTMPPrimaryProperties(
+            Material material,
+            float faceDilate,
+            float outlineWidth,
+            float outlineSoftness)
+        {
+            if (material.HasProperty(TmpFaceDilatePropertyId))
+                material.SetFloat(TmpFaceDilatePropertyId, faceDilate);
+            if (material.HasProperty(ShaderUtilities.ID_OutlineWidth))
+                material.SetFloat(ShaderUtilities.ID_OutlineWidth, outlineWidth);
+            if (material.HasProperty(ShaderUtilities.ID_OutlineSoftness))
+                material.SetFloat(ShaderUtilities.ID_OutlineSoftness, outlineSoftness);
+        }
+        private static void SolveTMPInnerGlowCompositeProperties(
+            Material baseMaterial,
+            float outlineWidth,
+            float outlineFaceDilate,
+            float effectPixelRange,
+            in TextGlowEffectInfo innerGlow,
+            in TMPTextInnerGlowCompositeFit seed,
+            out float faceDilate,
+            out float faceSoftness,
+            out float underlayDilate,
+            out float underlaySoftness)
+        {
+            var probe = new Material(baseMaterial) { hideFlags = HideFlags.HideAndDontSave };
+            SetTMPPrimaryProperties(probe, outlineFaceDilate, outlineWidth, 0f);
+            SetTMPUnderlayProbe(probe, 0f, 0f, 0f, 0f);
+            ShaderUtilities.UpdateShaderRatios(probe);
+
+            float ratioA = GetTMPMaterialScaleRatio(probe, ShaderUtilities.ID_ScaleRatio_A);
+            float ratioC = GetTMPMaterialScaleRatio(probe, ShaderUtilities.ID_ScaleRatio_C);
+            float inverseRange = 1f / Mathf.Max(0.01f, effectPixelRange);
+            float maxFaceDilate = Mathf.Min(1f, outlineFaceDilate);
+            faceDilate = Mathf.Clamp(
+                outlineFaceDilate - 2f * seed.FaceInsetPixels * inverseRange / ratioA,
+                -1f,
+                maxFaceDilate);
+            faceSoftness = Mathf.Clamp01(seed.FaceSoftnessPixels * inverseRange / ratioA);
+            underlayDilate = Mathf.Clamp(seed.UnderlayDilatePixels * inverseRange * 2f / ratioC, -1f, 1f);
+            underlaySoftness = Mathf.Clamp01(seed.UnderlaySoftnessPixels * inverseRange / ratioC);
+
+            float error = EvaluateTMPInnerGlowCompositeError(
+                probe,
+                outlineWidth,
+                faceDilate,
+                faceSoftness,
+                underlayDilate,
+                underlaySoftness,
+                effectPixelRange,
+                in innerGlow);
+
+            // The initial profile fit is already in physical pixels. A short coordinate
+            // descent then accounts for TMP's dynamic ScaleRatio constraints without a
+            // costly multidimensional grid search for every converted text layer.
+            for (int iteration = 0; iteration < 6; iteration++)
             {
-                return 0f;
+                float factor = 1f / (1 << iteration);
+                ImproveTMPInnerGlowCompositeParameter(
+                    probe, 0, 0.08f * factor, outlineWidth, maxFaceDilate, effectPixelRange, in innerGlow,
+                    ref faceDilate, ref faceSoftness, ref underlayDilate, ref underlaySoftness, ref error);
+                ImproveTMPInnerGlowCompositeParameter(
+                    probe, 1, 0.10f * factor, outlineWidth, maxFaceDilate, effectPixelRange, in innerGlow,
+                    ref faceDilate, ref faceSoftness, ref underlayDilate, ref underlaySoftness, ref error);
+                ImproveTMPInnerGlowCompositeParameter(
+                    probe, 2, 0.08f * factor, outlineWidth, maxFaceDilate, effectPixelRange, in innerGlow,
+                    ref faceDilate, ref faceSoftness, ref underlayDilate, ref underlaySoftness, ref error);
+                ImproveTMPInnerGlowCompositeParameter(
+                    probe, 3, 0.06f * factor, outlineWidth, maxFaceDilate, effectPixelRange, in innerGlow,
+                    ref faceDilate, ref faceSoftness, ref underlayDilate, ref underlaySoftness, ref error);
             }
 
-            float scale = Mathf.Max(1f, mat.GetFloat(ShaderUtilities.ID_GradientScale));
-            float weight = GetTMPMaterialWeight(mat);
-            float range = (weight + faceDilate) * (scale - TmpShaderClamp);
-            return Mathf.Max(0f, scale - TmpShaderClamp - range) / scale;
+            UnityEngine.Object.DestroyImmediate(probe);
         }
-        private static void FitTMPUnderlayToBudget(float budget, ref float offsetX, ref float offsetY, ref float dilate, ref float softness, bool allowNegativeDilate = false)
+        private static void ImproveTMPInnerGlowCompositeParameter(
+            Material probe,
+            int parameter,
+            float step,
+            float outlineWidth,
+            float maxFaceDilate,
+            float effectPixelRange,
+            in TextGlowEffectInfo innerGlow,
+            ref float faceDilate,
+            ref float faceSoftness,
+            ref float underlayDilate,
+            ref float underlaySoftness,
+            ref float currentError)
         {
-            if (budget <= 0f)
+            for (int direction = -1; direction <= 1; direction += 2)
+            {
+                float candidateFaceDilate = faceDilate;
+                float candidateFaceSoftness = faceSoftness;
+                float candidateUnderlayDilate = underlayDilate;
+                float candidateUnderlaySoftness = underlaySoftness;
+                float delta = direction * step;
+                switch (parameter)
+                {
+                    case 0:
+                        candidateFaceDilate = Mathf.Clamp(faceDilate + delta, -1f, maxFaceDilate);
+                        break;
+                    case 1:
+                        candidateFaceSoftness = Mathf.Clamp01(faceSoftness + delta);
+                        break;
+                    case 2:
+                        candidateUnderlayDilate = Mathf.Clamp(underlayDilate + delta, -1f, 1f);
+                        break;
+                    default:
+                        candidateUnderlaySoftness = Mathf.Clamp01(underlaySoftness + delta);
+                        break;
+                }
+
+                float error = EvaluateTMPInnerGlowCompositeError(
+                    probe,
+                    outlineWidth,
+                    candidateFaceDilate,
+                    candidateFaceSoftness,
+                    candidateUnderlayDilate,
+                    candidateUnderlaySoftness,
+                    effectPixelRange,
+                    in innerGlow);
+                if (error >= currentError)
+                    continue;
+
+                faceDilate = candidateFaceDilate;
+                faceSoftness = candidateFaceSoftness;
+                underlayDilate = candidateUnderlayDilate;
+                underlaySoftness = candidateUnderlaySoftness;
+                currentError = error;
+            }
+        }
+        private static float EvaluateTMPInnerGlowCompositeError(
+            Material probe,
+            float outlineWidth,
+            float faceDilate,
+            float faceSoftness,
+            float underlayDilate,
+            float underlaySoftness,
+            float effectPixelRange,
+            in TextGlowEffectInfo innerGlow)
+        {
+            SetTMPPrimaryProperties(probe, faceDilate, outlineWidth, faceSoftness);
+            SetTMPUnderlayProbe(probe, 0f, 0f, underlayDilate, underlaySoftness);
+            ShaderUtilities.UpdateShaderRatios(probe);
+
+            float ratioA = GetTMPMaterialScaleRatio(probe, ShaderUtilities.ID_ScaleRatio_A);
+            float ratioC = GetTMPMaterialScaleRatio(probe, ShaderUtilities.ID_ScaleRatio_C);
+            float normalWeight = probe.HasProperty(ShaderUtilities.ID_WeightNormal)
+                ? probe.GetFloat(ShaderUtilities.ID_WeightNormal) * 0.25f
+                : 0f;
+            float weight = (normalWeight + faceDilate) * ratioA * 0.5f;
+            float outlinePixels = outlineWidth * ratioA * effectPixelRange;
+            float faceSoftnessPixels = faceSoftness * ratioA * effectPixelRange;
+            float underlayScale = effectPixelRange / (1f + underlaySoftness * ratioC * effectPixelRange);
+            float underlayBias = (0.5f - weight) * underlayScale
+                - 0.5f
+                - underlayDilate * ratioC * 0.5f * underlayScale;
+
+            float insideExtent = Mathf.Min(
+                Mathf.Max(1f, innerGlow.Size * 1.5f),
+                Mathf.Max(1f, effectPixelRange * 0.75f));
+            float opacity = Mathf.Clamp01(innerGlow.Color.a);
+            float error = 0f;
+            const int InsideSamples = 48;
+            for (int i = 0; i < InsideSamples; i++)
+            {
+                float insideDistance = insideExtent * i / (InsideSamples - 1f);
+                // Photoshop composites an inner effect through the antialiased glyph
+                // coverage. TMP's normal Underlay is applied after Face, so its fitted
+                // peak must account for that coverage rather than force an opaque edge.
+                float target = opacity
+                    * TmpInnerGlowCompositePeakCoverage
+                    * TMPTextEffectParameterSolver.EvaluatePSGlowProfile(in innerGlow, insideDistance);
+                EvaluateTMPInnerGlowCompositeSample(
+                    insideDistance,
+                    target,
+                    1f,
+                    weight,
+                    outlinePixels,
+                    faceSoftnessPixels,
+                    underlayScale,
+                    underlayBias,
+                    effectPixelRange,
+                    ref error);
+            }
+
+            float outsideExtent = Mathf.Min(3f, Mathf.Max(1f, insideExtent * 0.25f));
+            const int OutsideSamples = 16;
+            for (int i = 1; i <= OutsideSamples; i++)
+            {
+                float outsideDistance = -outsideExtent * i / OutsideSamples;
+                EvaluateTMPInnerGlowCompositeSample(
+                    outsideDistance,
+                    0f,
+                    0f,
+                    weight,
+                    outlinePixels,
+                    faceSoftnessPixels,
+                    underlayScale,
+                    underlayBias,
+                    effectPixelRange,
+                    ref error);
+            }
+
+            return error;
+        }
+        private static void EvaluateTMPInnerGlowCompositeSample(
+            float insideDistance,
+            float targetGlowWeight,
+            float targetAlpha,
+            float weight,
+            float outlinePixels,
+            float faceSoftnessPixels,
+            float underlayScale,
+            float underlayBias,
+            float effectPixelRange,
+            ref float error)
+        {
+            float sd = 0.5f - insideDistance - weight * effectPixelRange;
+            float faceAlpha = 1f - Mathf.Clamp01(
+                (sd - outlinePixels * 0.5f + faceSoftnessPixels * 0.5f)
+                / (1f + faceSoftnessPixels));
+            float sdfAlpha = Mathf.Clamp01(0.5f + insideDistance / effectPixelRange);
+            float underlayAlpha = Mathf.Clamp01(sdfAlpha * underlayScale - underlayBias);
+            float glowWeight = underlayAlpha * (1f - faceAlpha);
+            float totalAlpha = faceAlpha + glowWeight;
+            float glowError = glowWeight - targetGlowWeight;
+            float alphaError = totalAlpha - targetAlpha;
+            error += glowError * glowError * 3f + alphaError * alphaError;
+        }
+        private static void SolveTMPUnderlayProperties(
+            Material baseMaterial,
+            float faceDilate,
+            float outlineWidth,
+            float outlineSoftness,
+            float effectPixelRange,
+            Vector2 offsetPixels,
+            float dilatePixels,
+            float softnessPixels,
+            out float offsetX,
+            out float offsetY,
+            out float dilate,
+            out float softness)
+        {
+            float inverseRange = 1f / Mathf.Max(0.01f, effectPixelRange);
+            float baseOffsetX = offsetPixels.x * inverseRange;
+            float baseOffsetY = offsetPixels.y * inverseRange;
+            float baseDilate = dilatePixels * inverseRange;
+            float baseSoftness = Mathf.Max(0f, softnessPixels) * inverseRange;
+            float maxBase = Mathf.Max(
+                Mathf.Max(Mathf.Abs(baseOffsetX), Mathf.Abs(baseOffsetY)),
+                Mathf.Max(Mathf.Abs(baseDilate), baseSoftness));
+            if (maxBase <= 0.000001f)
             {
                 offsetX = 0f;
                 offsetY = 0f;
@@ -2001,59 +3314,614 @@ namespace UGF.EditorTools.Psd2UGUI
                 return;
             }
 
-            offsetX = Mathf.Clamp(offsetX, -1f, 1f);
-            offsetY = Mathf.Clamp(offsetY, -1f, 1f);
-            dilate = Mathf.Clamp(dilate, allowNegativeDilate ? -1f : 0f, 1f);
-            softness = Mathf.Clamp(softness, 0f, 1f);
-
-            float offsetBudget = Mathf.Max(Mathf.Abs(offsetX), Mathf.Abs(offsetY));
-            if (offsetBudget > budget && offsetBudget > 0f)
+            var probe = new Material(baseMaterial) { hideFlags = HideFlags.HideAndDontSave };
+            SetTMPPrimaryProperties(probe, faceDilate, outlineWidth, outlineSoftness);
+            float low = 0f;
+            float high = Mathf.Min(64f, 1f / maxBase);
+            for (int i = 0; i < 28; i++)
             {
-                float scale = budget / offsetBudget;
-                offsetX *= scale;
-                offsetY *= scale;
-                dilate = 0f;
-                softness = 0f;
+                float multiplier = (low + high) * 0.5f;
+                SetTMPUnderlayProbe(
+                    probe,
+                    baseOffsetX * multiplier,
+                    baseOffsetY * multiplier,
+                    baseDilate * multiplier,
+                    baseSoftness * multiplier);
+                ShaderUtilities.UpdateShaderRatios(probe);
+                float ratio = GetTMPMaterialScaleRatio(probe, ShaderUtilities.ID_ScaleRatio_C);
+                if (multiplier * ratio < 1f)
+                    low = multiplier;
+                else
+                    high = multiplier;
+            }
+
+            float solved = (low + high) * 0.5f;
+            offsetX = Mathf.Clamp(baseOffsetX * solved, -1f, 1f);
+            offsetY = Mathf.Clamp(baseOffsetY * solved, -1f, 1f);
+            dilate = Mathf.Clamp(baseDilate * solved, -1f, 1f);
+            softness = Mathf.Clamp01(baseSoftness * solved);
+            UnityEngine.Object.DestroyImmediate(probe);
+        }
+        private static void SetTMPUnderlayProbe(
+            Material material,
+            float offsetX,
+            float offsetY,
+            float dilate,
+            float softness)
+        {
+            if (material.HasProperty(ShaderUtilities.ID_UnderlayOffsetX))
+                material.SetFloat(ShaderUtilities.ID_UnderlayOffsetX, offsetX);
+            if (material.HasProperty(ShaderUtilities.ID_UnderlayOffsetY))
+                material.SetFloat(ShaderUtilities.ID_UnderlayOffsetY, offsetY);
+            if (material.HasProperty(ShaderUtilities.ID_UnderlayDilate))
+                material.SetFloat(ShaderUtilities.ID_UnderlayDilate, dilate);
+            if (material.HasProperty(ShaderUtilities.ID_UnderlaySoftness))
+                material.SetFloat(ShaderUtilities.ID_UnderlaySoftness, softness);
+        }
+        private static void SolveTMPGlowProperties(
+            Material baseMaterial,
+            float faceDilate,
+            float outlineWidth,
+            float outlineSoftness,
+            float effectPixelRange,
+            float offsetPixels,
+            float outerKernelPixels,
+            out float offset,
+            out float outer)
+        {
+            float inverseHalfRange = 2f / Mathf.Max(0.01f, effectPixelRange);
+            float baseOffset = Mathf.Max(0f, offsetPixels) * inverseHalfRange;
+            float baseOuter = Mathf.Max(0f, outerKernelPixels) * inverseHalfRange;
+            float maxBase = Mathf.Max(baseOffset, baseOuter);
+            if (maxBase <= 0.000001f)
+            {
+                offset = 0f;
+                outer = 0f;
                 return;
             }
 
-            float remaining = budget - offsetBudget;
-            float dilateMagnitude = Mathf.Min(Mathf.Abs(dilate), remaining);
-            dilate = Mathf.Sign(dilate) * dilateMagnitude;
-            remaining -= dilateMagnitude;
-            softness = Mathf.Min(softness, remaining);
-        }
-        private static float NormalizeTMPBudgetedValue(float actualValue, float budget)
-        {
-            if (budget <= 0f)
+            var probe = new Material(baseMaterial) { hideFlags = HideFlags.HideAndDontSave };
+            SetTMPPrimaryProperties(probe, faceDilate, outlineWidth, outlineSoftness);
+            float low = 0f;
+            float high = Mathf.Min(64f, 1f / maxBase);
+            for (int i = 0; i < 24; i++)
             {
-                return 0f;
+                float multiplier = (low + high) * 0.5f;
+                probe.SetFloat(ShaderUtilities.ID_GlowOffset, baseOffset * multiplier);
+                probe.SetFloat(ShaderUtilities.ID_GlowOuter, baseOuter * multiplier);
+                ShaderUtilities.UpdateShaderRatios(probe);
+                float ratio = GetTMPMaterialScaleRatio(probe, ShaderUtilities.ID_ScaleRatio_B);
+                if (multiplier * ratio < 1f)
+                    low = multiplier;
+                else
+                    high = multiplier;
             }
 
-            return actualValue / budget;
+            float solved = (low + high) * 0.5f;
+            offset = Mathf.Clamp01(baseOffset * solved);
+            outer = Mathf.Clamp01(baseOuter * solved);
+            UnityEngine.Object.DestroyImmediate(probe);
+        }
+        private static void FitTMPBevelMaterial(
+            Color baseColor,
+            float surfaceSlope,
+            float altitudeDegrees,
+            Color specularColor,
+            float highlightOpacity,
+            Color shadowColor,
+            float shadowOpacity,
+            string shadowBlendMode,
+            TextEffectContourPoint[] contour,
+            out float ambient,
+            out float diffuse,
+            out float reflectivity,
+            out float specularPower)
+        {
+            surfaceSlope = Mathf.Clamp(surfaceSlope, 0f, 2f);
+            float altitude = Mathf.Clamp(altitudeDegrees, 0.01f, 89.99f) * Mathf.Deg2Rad;
+            float normalScale = 1f / Mathf.Sqrt(1f + surfaceSlope * surfaceSlope);
+            float normalZSquared = normalScale * normalScale;
+            highlightOpacity = Mathf.Clamp01(highlightOpacity);
+            shadowOpacity = Mathf.Clamp01(shadowOpacity);
+
+            const int ambientSteps = 14;
+            const int diffuseSteps = 14;
+            const int exponentSteps = 14;
+            const int sampleCount = 72;
+            float bestError = float.MaxValue;
+            ambient = 1f;
+            diffuse = 0f;
+            reflectivity = 10f;
+            specularPower = 0f;
+
+            for (int ambientIndex = 0; ambientIndex < ambientSteps; ambientIndex++)
+            {
+                float candidateAmbient = Mathf.Lerp(0.35f, 1f, ambientIndex / (float)(ambientSteps - 1));
+                for (int diffuseIndex = 0; diffuseIndex < diffuseSteps; diffuseIndex++)
+                {
+                    float candidateDiffuse = diffuseIndex / (float)(diffuseSteps - 1);
+                    for (int exponentIndex = 0; exponentIndex < exponentSteps; exponentIndex++)
+                    {
+                        float candidateExponent = Mathf.Lerp(5f, 15f, exponentIndex / (float)(exponentSteps - 1));
+                        float numerator = 0f;
+                        float denominator = 0f;
+                        for (int sample = 0; sample < sampleCount; sample++)
+                        {
+                            GetTMPBevelFitSample(
+                                sample,
+                                sampleCount,
+                                surfaceSlope,
+                                altitude,
+                                normalScale,
+                                contour,
+                                baseColor,
+                                shadowColor,
+                                shadowOpacity,
+                                shadowBlendMode,
+                                specularColor,
+                                highlightOpacity,
+                                candidateAmbient,
+                                candidateDiffuse,
+                                candidateExponent,
+                                out Color baseApproximation,
+                                out Color specularBasis,
+                                out Color target);
+                            numerator += DotRGB(specularBasis, target - baseApproximation);
+                            denominator += DotRGB(specularBasis, specularBasis);
+                        }
+
+                        float candidatePower = denominator > 0.000001f
+                            ? Mathf.Clamp(numerator / denominator, 0f, 4f)
+                            : 0f;
+                        float error = 0f;
+                        for (int sample = 0; sample < sampleCount; sample++)
+                        {
+                            GetTMPBevelFitSample(
+                                sample,
+                                sampleCount,
+                                surfaceSlope,
+                                altitude,
+                                normalScale,
+                                contour,
+                                baseColor,
+                                shadowColor,
+                                shadowOpacity,
+                                shadowBlendMode,
+                                specularColor,
+                                highlightOpacity,
+                                candidateAmbient,
+                                candidateDiffuse,
+                                candidateExponent,
+                                out Color baseApproximation,
+                                out Color specularBasis,
+                                out Color target);
+                            Color delta = baseApproximation + specularBasis * candidatePower - target;
+                            error += DotRGB(delta, delta);
+                        }
+
+                        if (error >= bestError)
+                            continue;
+                        bestError = error;
+                        ambient = candidateAmbient;
+                        diffuse = candidateDiffuse;
+                        reflectivity = candidateExponent;
+                        specularPower = candidatePower;
+                    }
+                }
+            }
+        }
+        private static void GetTMPBevelFitSample(
+            int sample,
+            int sampleCount,
+            float surfaceSlope,
+            float altitude,
+            float normalScale,
+            TextEffectContourPoint[] contour,
+            Color baseColor,
+            Color shadowColor,
+            float shadowOpacity,
+            string shadowBlendMode,
+            Color specularColor,
+            float highlightOpacity,
+            float ambient,
+            float diffuse,
+            float exponent,
+            out Color baseApproximation,
+            out Color specularBasis,
+            out Color target)
+        {
+            float azimuthCos = Mathf.Cos((sample + 0.5f) * Mathf.PI * 2f / sampleCount);
+            float tmpDot = (surfaceSlope * azimuthCos + 1f) * normalScale * 0.70710678118f;
+            float diffuseMultiplier = 1f - tmpDot * diffuse;
+            float ambientMultiplier = Mathf.Lerp(ambient, 1f, normalScale * normalScale);
+            float lightingMultiplier = diffuseMultiplier * ambientMultiplier;
+            baseApproximation = baseColor * lightingMultiplier;
+            float specular = Mathf.Pow(Mathf.Max(0f, tmpDot), exponent) * lightingMultiplier;
+            specularBasis = specularColor * specular;
+
+            float psIncidence = Mathf.Clamp01((surfaceSlope * Mathf.Cos(altitude) * azimuthCos
+                + Mathf.Sin(altitude)) * normalScale);
+            float highlight = EvaluateTextEffectContour(contour, psIncidence) * highlightOpacity;
+            float shadow = EvaluateTextEffectContour(contour, 1f - psIncidence) * shadowOpacity;
+            Color shadowBlend = BlendTMPGradientColor(baseColor, shadowColor, shadowBlendMode);
+            target = Color.LerpUnclamped(baseColor, shadowBlend, shadow);
+            target += specularColor * highlight;
+        }
+        private static float DotRGB(Color left, Color right)
+        {
+            return left.r * right.r + left.g * right.g + left.b * right.b;
+        }
+        private static float EvaluateTextEffectContour(TextEffectContourPoint[] contour, float input)
+        {
+            input = Mathf.Clamp01(input);
+            if (contour == null || contour.Length == 0)
+                return input;
+            if (input <= contour[0].Input)
+                return contour[0].Output;
+
+            for (int i = 1; i < contour.Length; i++)
+            {
+                if (input > contour[i].Input)
+                    continue;
+
+                float range = contour[i].Input - contour[i - 1].Input;
+                if (range <= 0.00001f)
+                    return contour[i].Output;
+                float t = (input - contour[i - 1].Input) / range;
+                return Mathf.LerpUnclamped(contour[i - 1].Output, contour[i].Output, t);
+            }
+            return contour[contour.Length - 1].Output;
+        }
+        private static Color CompensateTMPAdditiveEffectColor(Color baseColor, Color effectColor, string blendModeKey)
+        {
+            string mode = (blendModeKey ?? string.Empty).Trim();
+            if (string.Equals(mode, "Scrn", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(mode, "Screen", StringComparison.OrdinalIgnoreCase))
+            {
+                effectColor.r *= 1f - baseColor.r;
+                effectColor.g *= 1f - baseColor.g;
+                effectColor.b *= 1f - baseColor.b;
+            }
+            return effectColor;
         }
         private static float ConvertPSDBevelAngleToTMPLightAngle(float psdAngle)
         {
             float normalizedAngle = Mathf.Repeat(90f - psdAngle, 360f);
             return normalizedAngle * Mathf.Deg2Rad;
         }
-        private static float GetColorLuminance(Color color)
+        private static bool IsPSDSmoothBevelTechnique(string techniqueKey)
         {
-            return color.r * 0.2126f + color.g * 0.7152f + color.b * 0.0722f;
+            string technique = (techniqueKey ?? string.Empty).Trim();
+            return technique.Length == 0
+                || string.Equals(technique, "SfBL", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(technique, "Smooth", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(technique, "softMatte", StringComparison.OrdinalIgnoreCase);
         }
+        private static bool IsPSDBevelDirectionDown(string directionKey)
+        {
+            string direction = (directionKey ?? string.Empty).Trim();
+            return string.Equals(direction, "Out", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(direction, "Down", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(direction, "stampOut", StringComparison.OrdinalIgnoreCase);
+        }
+        private static string BuildTMPGradientSignature(Color baseColor, Vector2 effectSize, in TextLayerInfo textInfo)
+        {
+            if (!HasUsableTMPGradientStops(in textInfo))
+                return "0";
+
+            Color32 baseColor32 = baseColor;
+            var builder = new StringBuilder(192);
+            builder.Append(Mathf.RoundToInt(textInfo.GradientAngle * 1000f)).Append('|')
+                .Append(textInfo.GradientReverse ? 1 : 0).Append('|')
+                .Append(Mathf.RoundToInt(textInfo.GradientOpacity * 10000f)).Append('|')
+                .Append(Mathf.RoundToInt(textInfo.GradientScale * 10000f)).Append('|')
+                .Append(Mathf.RoundToInt(textInfo.GradientOffset.x * 10000f)).Append(',')
+                .Append(Mathf.RoundToInt(textInfo.GradientOffset.y * 10000f)).Append('|')
+                .Append(textInfo.GradientAlignWithLayer ? 1 : 0).Append('|')
+                .Append(textInfo.GradientDither ? 1 : 0).Append('|')
+                .Append(textInfo.GradientStyleKey).Append('|')
+                .Append(textInfo.GradientBlendModeKey).Append('|')
+                .Append(textInfo.GradientInterpolationKey).Append('|')
+                .Append(Mathf.RoundToInt(Mathf.Abs(effectSize.x) * 100f)).Append(',')
+                .Append(Mathf.RoundToInt(Mathf.Abs(effectSize.y) * 100f)).Append('|')
+                .Append(Mathf.RoundToInt(textInfo.LayerOpacity * 10000f)).Append('|')
+                .Append(baseColor32.r).Append(',').Append(baseColor32.g).Append(',')
+                .Append(baseColor32.b).Append(',').Append(baseColor32.a);
+
+            var stops = textInfo.GradientStops;
+            for (int i = 0; i < stops.Length; i++)
+            {
+                Color32 color = stops[i].Color;
+                builder.Append('|').Append(Mathf.RoundToInt(stops[i].Location * 100000f)).Append(':')
+                    .Append(color.r).Append(',').Append(color.g).Append(',').Append(color.b).Append(',').Append(color.a);
+            }
+            return builder.ToString();
+        }
+
+        private static Texture2D GetOrCreateTMPGradientTexture(
+            TMP_FontAsset fontAsset,
+            string gradientSignature,
+            Color baseColor,
+            Vector2 effectSize,
+            in TextLayerInfo textInfo)
+        {
+            string hash = Hash128.Compute(gradientSignature).ToString();
+            if (tmpGradientTextureCache.TryGetValue(hash, out var cachedTexture) && cachedTexture != null)
+                return cachedTexture;
+
+            string folderPath = ResolveTMPMaterialFolderPath(fontAsset, null);
+            string texturePath = string.IsNullOrWhiteSpace(folderPath)
+                ? null
+                : $"{folderPath}/PsdGradient_{hash}.png";
+            if (!string.IsNullOrWhiteSpace(texturePath))
+            {
+                var textureAsset = AssetDatabase.LoadAssetAtPath<Texture2D>(texturePath);
+                if (textureAsset != null)
+                {
+                    tmpGradientTextureCache[hash] = textureAsset;
+                    return textureAsset;
+                }
+            }
+
+            const int textureSize = 128;
+            var texture = new Texture2D(textureSize, textureSize, TextureFormat.RGBA32, false, false)
+            {
+                name = $"PsdGradient_{hash}",
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+                anisoLevel = 0
+            };
+            var pixels = new Color32[textureSize * textureSize];
+            float width = Mathf.Max(1f, Mathf.Abs(effectSize.x));
+            float height = Mathf.Max(1f, Mathf.Abs(effectSize.y));
+            for (int y = 0; y < textureSize; y++)
+            {
+                float v = (y + 0.5f) / textureSize;
+                int row = y * textureSize;
+                for (int x = 0; x < textureSize; x++)
+                {
+                    float u = (x + 0.5f) / textureSize;
+                    float t = EvaluateTMPGradientCoordinate(u, v, width, height, in textInfo);
+                    if (textInfo.GradientDither)
+                    {
+                        t = Mathf.Clamp01(t + GetTMPGradientDither(x, y) / 255f);
+                    }
+                    pixels[row + x] = CompositeTMPGradient(baseColor, EvaluateTMPGradientColor(t, in textInfo), in textInfo);
+                }
+            }
+            texture.SetPixels32(pixels);
+            texture.Apply(false, false);
+
+            if (!string.IsNullOrWhiteSpace(texturePath))
+            {
+                string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+                string absoluteTexturePath = Path.GetFullPath(Path.Combine(projectRoot, texturePath));
+                File.WriteAllBytes(absoluteTexturePath, texture.EncodeToPNG());
+                UnityEngine.Object.DestroyImmediate(texture);
+                AssetDatabase.ImportAsset(texturePath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var importer = (TextureImporter)AssetImporter.GetAtPath(texturePath);
+                importer.textureType = TextureImporterType.Default;
+                importer.sRGBTexture = true;
+                importer.alphaSource = TextureImporterAlphaSource.FromInput;
+                importer.alphaIsTransparency = false;
+                importer.mipmapEnabled = false;
+                importer.wrapMode = TextureWrapMode.Clamp;
+                importer.filterMode = FilterMode.Bilinear;
+                importer.anisoLevel = 0;
+                importer.npotScale = TextureImporterNPOTScale.None;
+                importer.textureCompression = TextureImporterCompression.Uncompressed;
+                importer.SaveAndReimport();
+                texture = AssetDatabase.LoadAssetAtPath<Texture2D>(texturePath);
+            }
+            tmpGradientTextureCache[hash] = texture;
+            return texture;
+        }
+
+        private static float EvaluateTMPGradientCoordinate(float u, float v, float width, float height, in TextLayerInfo textInfo)
+        {
+            float radians = textInfo.GradientAngle * Mathf.Deg2Rad;
+            var direction = new Vector2(Mathf.Cos(radians), Mathf.Sin(radians));
+            var perpendicular = new Vector2(-direction.y, direction.x);
+            var center = new Vector2(
+                textInfo.GradientOffset.x * width * 0.5f,
+                -textInfo.GradientOffset.y * height * 0.5f);
+            var point = new Vector2((u - 0.5f) * width, (v - 0.5f) * height) - center;
+            float scale = Mathf.Max(0.0001f, textInfo.GradientScale);
+            string style = (textInfo.GradientStyleKey ?? string.Empty).Trim();
+            float t;
+            switch (style)
+            {
+                case "Rdl":
+                case "Radial":
+                    t = point.magnitude / (Mathf.Sqrt(width * width + height * height) * 0.5f * scale);
+                    break;
+                case "Angl":
+                case "Angle":
+                    t = Mathf.Repeat((Mathf.Atan2(point.y, point.x) - radians) / (Mathf.PI * 2f) + 0.5f, 1f);
+                    break;
+                case "Rflc":
+                case "Reflected":
+                    t = Mathf.Abs(Vector2.Dot(point, direction)) /
+                        ((Mathf.Abs(direction.x) * width + Mathf.Abs(direction.y) * height) * 0.5f * scale);
+                    break;
+                case "Dmnd":
+                case "Diamond":
+                    float diamondExtent = (Mathf.Abs(direction.x) + Mathf.Abs(perpendicular.x)) * width * 0.5f
+                        + (Mathf.Abs(direction.y) + Mathf.Abs(perpendicular.y)) * height * 0.5f;
+                    t = (Mathf.Abs(Vector2.Dot(point, direction)) + Mathf.Abs(Vector2.Dot(point, perpendicular))) /
+                        (diamondExtent * scale);
+                    break;
+                default:
+                    float linearExtent = (Mathf.Abs(direction.x) * width + Mathf.Abs(direction.y) * height) * 0.5f;
+                    t = 0.5f + Vector2.Dot(point, direction) / (2f * linearExtent * scale);
+                    break;
+            }
+
+            t = Mathf.Clamp01(t);
+            return textInfo.GradientReverse ? 1f - t : t;
+        }
+
+        private static Color EvaluateTMPGradientColor(float t, in TextLayerInfo textInfo)
+        {
+            var stops = textInfo.GradientStops;
+            if (t <= stops[0].Location)
+                return stops[0].Color;
+
+            int last = stops.Length - 1;
+            if (t >= stops[last].Location)
+                return stops[last].Color;
+
+            for (int i = 1; i <= last; i++)
+            {
+                if (t > stops[i].Location)
+                    continue;
+
+                float range = stops[i].Location - stops[i - 1].Location;
+                return range > 0.00001f
+                    ? InterpolateTMPGradientColor(
+                        stops[i - 1].Color,
+                        stops[i].Color,
+                        (t - stops[i - 1].Location) / range,
+                        textInfo.GradientInterpolationKey)
+                    : stops[i].Color;
+            }
+            return stops[last].Color;
+        }
+
+        private static Color InterpolateTMPGradientColor(Color start, Color end, float t, string interpolationKey)
+        {
+            if (string.Equals(interpolationKey, "Perc", StringComparison.OrdinalIgnoreCase))
+            {
+                Vector3 startLab = LinearRgbToOklab(start.linear);
+                Vector3 endLab = LinearRgbToOklab(end.linear);
+                Vector3 lab = Vector3.LerpUnclamped(startLab, endLab, t);
+                Color color = OklabToLinearRgb(lab).gamma;
+                color.a = Mathf.LerpUnclamped(start.a, end.a, t);
+                return color;
+            }
+
+            if (string.Equals(interpolationKey, "Smoo", StringComparison.OrdinalIgnoreCase))
+            {
+                Color color = Color.LerpUnclamped(start.linear, end.linear, t).gamma;
+                color.a = Mathf.LerpUnclamped(start.a, end.a, t);
+                return color;
+            }
+
+            return Color.LerpUnclamped(start, end, t);
+        }
+
+        private static Vector3 LinearRgbToOklab(Color color)
+        {
+            float l = Mathf.Pow(Mathf.Max(0f, 0.4122214708f * color.r + 0.5363325363f * color.g + 0.0514459929f * color.b), 1f / 3f);
+            float m = Mathf.Pow(Mathf.Max(0f, 0.2119034982f * color.r + 0.6806995451f * color.g + 0.1073969566f * color.b), 1f / 3f);
+            float s = Mathf.Pow(Mathf.Max(0f, 0.0883024619f * color.r + 0.2817188376f * color.g + 0.6299787005f * color.b), 1f / 3f);
+            return new Vector3(
+                0.2104542553f * l + 0.7936177850f * m - 0.0040720468f * s,
+                1.9779984951f * l - 2.4285922050f * m + 0.4505937099f * s,
+                0.0259040371f * l + 0.7827717662f * m - 0.8086757660f * s);
+        }
+
+        private static Color OklabToLinearRgb(Vector3 lab)
+        {
+            float l = lab.x + 0.3963377774f * lab.y + 0.2158037573f * lab.z;
+            float m = lab.x - 0.1055613458f * lab.y - 0.0638541728f * lab.z;
+            float s = lab.x - 0.0894841775f * lab.y - 1.2914855480f * lab.z;
+            l *= l * l;
+            m *= m * m;
+            s *= s * s;
+            return new Color(
+                Mathf.Clamp01(4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s),
+                Mathf.Clamp01(-1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s),
+                Mathf.Clamp01(-0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s),
+                1f);
+        }
+
+        private static Color32 CompositeTMPGradient(Color baseColor, Color gradientColor, in TextLayerInfo textInfo)
+        {
+            float layerOpacity = Mathf.Clamp01(textInfo.LayerOpacity);
+            float baseAlpha = layerOpacity > 0.00001f ? Mathf.Clamp01(baseColor.a / layerOpacity) : 0f;
+            float overlayAlpha = Mathf.Clamp01(gradientColor.a * textInfo.GradientOpacity);
+            Color blended = BlendTMPGradientColor(baseColor, gradientColor, textInfo.GradientBlendModeKey);
+            float outputAlpha = overlayAlpha + baseAlpha * (1f - overlayAlpha);
+            float inverseAlpha = outputAlpha > 0.00001f ? 1f / outputAlpha : 0f;
+            var output = new Color(
+                (blended.r * overlayAlpha + baseColor.r * baseAlpha * (1f - overlayAlpha)) * inverseAlpha,
+                (blended.g * overlayAlpha + baseColor.g * baseAlpha * (1f - overlayAlpha)) * inverseAlpha,
+                (blended.b * overlayAlpha + baseColor.b * baseAlpha * (1f - overlayAlpha)) * inverseAlpha,
+                outputAlpha * layerOpacity);
+            return output;
+        }
+
+        private static Color BlendTMPGradientColor(Color baseColor, Color overlayColor, string blendModeKey)
+        {
+            string mode = (blendModeKey ?? string.Empty).Trim();
+            switch (mode)
+            {
+                case "Mltp":
+                    return new Color(baseColor.r * overlayColor.r, baseColor.g * overlayColor.g, baseColor.b * overlayColor.b, 1f);
+                case "Scrn":
+                    return new Color(1f - (1f - baseColor.r) * (1f - overlayColor.r), 1f - (1f - baseColor.g) * (1f - overlayColor.g), 1f - (1f - baseColor.b) * (1f - overlayColor.b), 1f);
+                case "Ovrl":
+                    return new Color(BlendTMPOverlay(baseColor.r, overlayColor.r), BlendTMPOverlay(baseColor.g, overlayColor.g), BlendTMPOverlay(baseColor.b, overlayColor.b), 1f);
+                case "SftL":
+                    return new Color(BlendTMPSoftLight(baseColor.r, overlayColor.r), BlendTMPSoftLight(baseColor.g, overlayColor.g), BlendTMPSoftLight(baseColor.b, overlayColor.b), 1f);
+                case "HrdL":
+                    return new Color(BlendTMPOverlay(overlayColor.r, baseColor.r), BlendTMPOverlay(overlayColor.g, baseColor.g), BlendTMPOverlay(overlayColor.b, baseColor.b), 1f);
+                case "Drkn":
+                    return new Color(Mathf.Min(baseColor.r, overlayColor.r), Mathf.Min(baseColor.g, overlayColor.g), Mathf.Min(baseColor.b, overlayColor.b), 1f);
+                case "Lghn":
+                    return new Color(Mathf.Max(baseColor.r, overlayColor.r), Mathf.Max(baseColor.g, overlayColor.g), Mathf.Max(baseColor.b, overlayColor.b), 1f);
+                default:
+                    return new Color(overlayColor.r, overlayColor.g, overlayColor.b, 1f);
+            }
+        }
+
+        private static float BlendTMPOverlay(float baseValue, float overlayValue)
+        {
+            return baseValue <= 0.5f
+                ? 2f * baseValue * overlayValue
+                : 1f - 2f * (1f - baseValue) * (1f - overlayValue);
+        }
+
+        private static float BlendTMPSoftLight(float baseValue, float overlayValue)
+        {
+            return overlayValue <= 0.5f
+                ? baseValue - (1f - 2f * overlayValue) * baseValue * (1f - baseValue)
+                : baseValue + (2f * overlayValue - 1f) * (Mathf.Sqrt(baseValue) - baseValue);
+        }
+
+        private static float GetTMPGradientDither(int x, int y)
+        {
+            int index = (x & 3) | ((y & 3) << 2);
+            return (TmpGradientBayer4x4[index] - 7.5f) / 16f;
+        }
+
         private static void ApplyTMPEffectMaterialProperties(Material mat,
-            float outlineWidth, float faceDilate, float outlineSoftness, Color32 outlineColor, bool hasOutline,
+            float outlineWidth, float faceDilate, float faceSoftness, Color32 outlineColor, bool hasOutline,
             float shadowOffsetX, float shadowOffsetY, float shadowDilate, float shadowSoftness, Color32 shadowColor, bool hasShadow, bool shadowIsInner,
             Color32 glowColor, float glowOffset, float glowInner, float glowOuter, float glowPower, bool hasGlow,
             float bevelAmount, float bevelOffset, float bevelWidth, float bevelClamp, float bevelRoundness, float lightAngle,
             Color bevelSpecularColor, Color bevelReflectFaceColor, Color bevelReflectOutlineColor, float bevelSpecularPower, float bevelReflectivity, float bevelDiffuse, float bevelAmbient,
-            float bevelShaderFlags, bool hasBevel)
+            float bevelShaderFlags, bool hasBevel, Texture2D gradientTexture, bool hasGradient)
         {
             if (mat == null) return;
 
+            // Text color belongs to TMP's Vertex Color. Keeping the material face
+            // white prevents the shared material from tinting it a second time.
+            if (mat.HasProperty(ShaderUtilities.ID_FaceColor))
+                mat.SetColor(ShaderUtilities.ID_FaceColor, Color.white);
+
+            if (hasGradient)
+            {
+                if (mat.HasProperty(TmpFaceTexturePropertyId))
+                    mat.SetTexture(TmpFaceTexturePropertyId, gradientTexture);
+                if (mat.HasProperty(TmpFaceTextureTransformPropertyId))
+                    mat.SetVector(TmpFaceTextureTransformPropertyId, new Vector4(1f, 1f, 0f, 0f));
+            }
+
             if (mat.HasProperty(TmpFaceDilatePropertyId))
             {
-                mat.SetFloat(TmpFaceDilatePropertyId, hasOutline ? faceDilate : 0f);
+                mat.SetFloat(TmpFaceDilatePropertyId, faceDilate);
             }
             if (mat.HasProperty(ShaderUtilities.ID_OutlineWidth))
             {
@@ -2061,7 +3929,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
             if (mat.HasProperty(ShaderUtilities.ID_OutlineSoftness))
             {
-                mat.SetFloat(ShaderUtilities.ID_OutlineSoftness, outlineSoftness);
+                mat.SetFloat(ShaderUtilities.ID_OutlineSoftness, faceSoftness);
             }
             if (mat.HasProperty(ShaderUtilities.ID_OutlineColor))
             {
@@ -2214,6 +4082,10 @@ namespace UGF.EditorTools.Psd2UGUI
         private static string BuildTMPEffectMaterialName(TMP_FontAsset fontAsset, Material baseMaterial, in TextLayerInfo textInfo)
         {
             string effectTypeName = GetTMPEffectMaterialTypeName(in textInfo);
+            return BuildTMPMaterialName(fontAsset, baseMaterial, effectTypeName);
+        }
+        private static string BuildTMPMaterialName(TMP_FontAsset fontAsset, Material baseMaterial, string effectTypeName)
+        {
             string folderPath = ResolveTMPMaterialFolderPath(fontAsset, baseMaterial);
             if (string.IsNullOrWhiteSpace(folderPath))
             {
@@ -2310,7 +4182,11 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         private static string GetTMPEffectMaterialTypeName(in TextLayerInfo textInfo)
         {
-            var parts = new List<string>(4);
+            var parts = new List<string>(5);
+            if (ResolveTMPGradientOutput(in textInfo) == TMPGradientOutput.Texture)
+            {
+                parts.Add("Gradient");
+            }
             if (textInfo.HasOutline)
             {
                 parts.Add("Outline");
@@ -2321,7 +4197,10 @@ namespace UGF.EditorTools.Psd2UGUI
             }
             if (textInfo.HasGlow)
             {
-                parts.Add(textInfo.GlowIsInner ? "InnerGlow" : "Glow");
+                if (textInfo.OuterGlow.Enabled)
+                    parts.Add("Glow");
+                if (textInfo.InnerGlow.Enabled)
+                    parts.Add("InnerGlow");
             }
             if (textInfo.HasBevel)
             {
@@ -2584,6 +4463,100 @@ namespace UGF.EditorTools.Psd2UGUI
             }
             return changed;
         }
+        private static TMP_FontAsset EnsureTMPRichTextFontAsset(TMP_FontAsset fontAsset)
+        {
+            if (fontAsset == null)
+                return null;
+
+            string assetPath = AssetDatabase.GetAssetPath(fontAsset);
+            if (string.IsNullOrWhiteSpace(assetPath))
+                return null;
+            assetPath = assetPath.Replace("\\", "/");
+            string resourcePath = TMP_Settings.instance != null
+                ? TMP_Settings.defaultFontAssetPath
+                : "Fonts & Materials/";
+            resourcePath = string.IsNullOrWhiteSpace(resourcePath)
+                ? "Fonts & Materials"
+                : resourcePath.Replace("\\", "/").Trim('/');
+            string resourceMarker = "/Resources/" + resourcePath + "/";
+            if (assetPath.IndexOf(resourceMarker, StringComparison.OrdinalIgnoreCase) >= 0
+                && string.Equals(
+                    Path.GetFileNameWithoutExtension(assetPath),
+                    fontAsset.name,
+                    StringComparison.Ordinal))
+            {
+                return fontAsset;
+            }
+
+            if (fontAsset.name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            {
+                return null;
+            }
+
+            EnsureTMPFontAssetResources(fontAsset);
+            AssetDatabase.SaveAssets();
+
+            string targetFolder = "Assets/TextMesh Pro/Resources/" + resourcePath;
+            EnsureAssetFolderExists(targetFolder);
+            string targetName = fontAsset.name;
+            string targetPath = targetFolder + "/" + targetName + ".asset";
+            var resourceFont = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(targetPath);
+            if (resourceFont != null && HasSameTMPFontSource(resourceFont, fontAsset))
+                return resourceFont;
+            if (resourceFont != null)
+            {
+                string guid = AssetDatabase.AssetPathToGUID(assetPath);
+                if (string.IsNullOrEmpty(guid))
+                    return null;
+                targetName += "_" + guid.Substring(0, 8);
+                targetPath = targetFolder + "/" + targetName + ".asset";
+                resourceFont = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(targetPath);
+                if (resourceFont != null && HasSameTMPFontSource(resourceFont, fontAsset))
+                    return resourceFont;
+                if (resourceFont != null)
+                    return null;
+            }
+
+            if (!AssetDatabase.CopyAsset(assetPath, targetPath))
+                return null;
+
+            AssetDatabase.ImportAsset(targetPath, ImportAssetOptions.ForceSynchronousImport);
+            resourceFont = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(targetPath);
+            if (resourceFont != null && !string.Equals(resourceFont.name, targetName, StringComparison.Ordinal))
+            {
+                resourceFont.name = targetName;
+                EditorUtility.SetDirty(resourceFont);
+                AssetDatabase.SaveAssets();
+            }
+            return resourceFont;
+        }
+
+        private static bool HasSameTMPFontSource(TMP_FontAsset left, TMP_FontAsset right)
+        {
+            if (left == right)
+                return true;
+            if (left.sourceFontFile != null && left.sourceFontFile == right.sourceFontFile)
+                return true;
+
+            string leftGuid = left.creationSettings.sourceFontFileGUID;
+            string rightGuid = right.creationSettings.sourceFontFileGUID;
+            return !string.IsNullOrEmpty(leftGuid)
+                && string.Equals(leftGuid, rightGuid, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void EnsureAssetFolderExists(string assetFolderPath)
+        {
+            string[] parts = assetFolderPath.Split('/');
+            string current = parts[0];
+            for (int i = 1; i < parts.Length; i++)
+            {
+                string next = current + "/" + parts[i];
+                if (!AssetDatabase.IsValidFolder(next))
+                    AssetDatabase.CreateFolder(current, parts[i]);
+                current = next;
+            }
+        }
+
         private static Material EnsureTMPFontAssetResources(TMP_FontAsset fontAsset)
         {
             if (fontAsset == null)
@@ -2950,7 +4923,10 @@ namespace UGF.EditorTools.Psd2UGUI
 
             return false;
         }
-        private static TMP_FontAsset CreateTMPFontAsset(UnityEngine.Font sourceFont)
+        private static TMP_FontAsset CreateTMPFontAsset(
+            UnityEngine.Font sourceFont,
+            int minimumAtlasPadding = 9,
+            int samplingPointSize = 90)
         {
             if (sourceFont == null) return null;
             if (TMP_Settings.instance == null)
@@ -2979,7 +4955,9 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             string sourceFontGuid = AssetDatabase.AssetPathToGUID(sourceFontPath);
-            var existingFontAsset = FindExistingTMPFontBySource(sourceFont, sourceFontGuid);
+            minimumAtlasPadding = Mathf.Max(9, minimumAtlasPadding);
+            samplingPointSize = Mathf.Max(16, samplingPointSize);
+            var existingFontAsset = FindExistingTMPFontBySource(sourceFont, sourceFontGuid, minimumAtlasPadding);
             if (existingFontAsset != null)
             {
                 EnsureTMPFontAssetResources(existingFontAsset);
@@ -2993,8 +4971,19 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             string assetBaseName = Path.GetFileNameWithoutExtension(sourceFontPath);
-            string assetPath = AssetDatabase.GenerateUniqueAssetPath($"{folderPath}/{assetBaseName} SDF.asset");
-            var fontAsset = TMP_FontAsset.CreateFontAsset(sourceFont);
+            string fontAssetName = minimumAtlasPadding > 9
+                ? $"{assetBaseName} PSD SDF P{minimumAtlasPadding}"
+                : $"{assetBaseName} SDF";
+            string assetPath = AssetDatabase.GenerateUniqueAssetPath($"{folderPath}/{fontAssetName}.asset");
+            var fontAsset = TMP_FontAsset.CreateFontAsset(
+                sourceFont,
+                samplingPointSize,
+                minimumAtlasPadding,
+                UnityEngine.TextCore.LowLevel.GlyphRenderMode.SDFAA,
+                1024,
+                1024,
+                AtlasPopulationMode.Dynamic,
+                true);
             if (fontAsset == null)
             {
                 return null;
@@ -3094,22 +5083,98 @@ namespace UGF.EditorTools.Psd2UGUI
             EnsureTMPFontAssetResources(persistedFontAsset);
             return persistedFontAsset;
         }
-        private static TMP_FontAsset FindExistingTMPFontBySource(UnityEngine.Font sourceFont, string sourceFontGuid)
+        private static TMP_FontAsset FindExistingTMPFontBySource(
+            UnityEngine.Font sourceFont,
+            string sourceFontGuid,
+            int minimumAtlasPadding = 0)
         {
             if (sourceFont == null) return null;
 
+            TMP_FontAsset best = null;
             var fontGuids = AssetDatabase.FindAssets("t:TMP_FontAsset");
             foreach (var guid in fontGuids)
             {
                 var fontPath = AssetDatabase.GUIDToAssetPath(guid);
                 var font = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(fontPath);
-                if (IsTMPFontFromSource(font, sourceFont, sourceFontGuid))
-                {
-                    return font;
-                }
+                if (!IsTMPFontFromSource(font, sourceFont, sourceFontGuid)
+                    || font.atlasPadding < minimumAtlasPadding)
+                    continue;
+                if (best == null || font.atlasPadding < best.atlasPadding)
+                    best = font;
             }
 
-            return null;
+            return best;
+        }
+        private static TMP_FontAsset EnsureTMPEffectFontCapacity(
+            TMP_FontAsset fontAsset,
+            float fontSize,
+            in TextLayerInfo textInfo)
+        {
+            if (fontAsset == null || !HasTMPDistanceFieldEffects(in textInfo))
+                return fontAsset;
+
+            int requiredPadding = CalculateRequiredTMPEffectAtlasPadding(fontAsset, fontSize, in textInfo);
+            if (fontAsset.atlasPadding >= requiredPadding)
+                return fontAsset;
+
+            UnityEngine.Font sourceFont = fontAsset.sourceFontFile;
+            if (sourceFont == null && !string.IsNullOrWhiteSpace(fontAsset.creationSettings.sourceFontFileGUID))
+            {
+                string sourcePath = AssetDatabase.GUIDToAssetPath(fontAsset.creationSettings.sourceFontFileGUID);
+                sourceFont = AssetDatabase.LoadAssetAtPath<UnityEngine.Font>(sourcePath);
+            }
+            if (sourceFont == null)
+                return fontAsset;
+
+            string sourcePathForGuid = AssetDatabase.GetAssetPath(sourceFont);
+            string sourceGuid = AssetDatabase.AssetPathToGUID(sourcePathForGuid);
+            var existing = FindExistingTMPFontBySource(sourceFont, sourceGuid, requiredPadding);
+            if (existing != null)
+                return existing;
+
+            int pointSize = fontAsset.faceInfo.pointSize > 0f
+                ? Mathf.RoundToInt(fontAsset.faceInfo.pointSize)
+                : 90;
+            return CreateTMPFontAsset(sourceFont, requiredPadding, pointSize) ?? fontAsset;
+        }
+        private static bool HasTMPDistanceFieldEffects(in TextLayerInfo textInfo)
+        {
+            return textInfo.HasOutline || textInfo.HasShadow || textInfo.HasGlow || textInfo.HasBevel;
+        }
+        internal static int CalculateRequiredTMPEffectAtlasPadding(
+            TMP_FontAsset fontAsset,
+            float fontSize,
+            in TextLayerInfo textInfo)
+        {
+            if (!HasTMPDistanceFieldEffects(in textInfo))
+                return fontAsset != null ? Mathf.Max(9, fontAsset.atlasPadding) : 9;
+
+            float effectRadius = textInfo.HasOutline ? Mathf.Max(0f, textInfo.TMPOutlineSize) : 0f;
+            if (textInfo.HasShadow)
+            {
+                effectRadius = Mathf.Max(
+                    effectRadius,
+                    Mathf.Max(Mathf.Abs(textInfo.ShadowOffset.x), Mathf.Abs(textInfo.ShadowOffset.y))
+                        + Mathf.Max(0f, textInfo.ShadowSoftness));
+            }
+            if (textInfo.OuterGlow.Enabled)
+                effectRadius = Mathf.Max(effectRadius, textInfo.OuterGlow.Size);
+            if (textInfo.InnerGlow.Enabled)
+                effectRadius = Mathf.Max(effectRadius, textInfo.InnerGlow.Size);
+            if (textInfo.HasBevel)
+            {
+                effectRadius = Mathf.Max(
+                    effectRadius,
+                    Mathf.Sqrt(textInfo.BevelSize * textInfo.BevelSize + textInfo.BevelSoften * textInfo.BevelSoften));
+            }
+
+            float atlasPointSize = fontAsset != null && fontAsset.faceInfo.pointSize > 0f
+                ? fontAsset.faceInfo.pointSize
+                : Mathf.Max(16f, fontSize);
+            float renderedScale = Mathf.Max(0.01f, fontSize / atlasPointSize);
+            int rawPadding = Mathf.CeilToInt((2f * effectRadius + 1f) / renderedScale);
+            int bucket = rawPadding <= 16 ? 16 : Mathf.NextPowerOfTwo(rawPadding);
+            return Mathf.Clamp(bucket, 9, 128);
         }
         private static void EnsureTMPFontHasCharacters(TMP_FontAsset fontAsset, string text)
         {
@@ -3244,6 +5309,7 @@ namespace UGF.EditorTools.Psd2UGUI
         private sealed class PsTagAliasRule
         {
             public string Main;
+            public string Export;
             public string Role;
             public string ImageType;
             public string TextBackend;
@@ -3252,6 +5318,7 @@ namespace UGF.EditorTools.Psd2UGUI
         private sealed class PsRasterizeAsImageConfig
         {
             public readonly HashSet<string> MainIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public readonly HashSet<string> ExportIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             public readonly HashSet<string> RoleIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         }
 
@@ -3261,6 +5328,8 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 case "main":
                     return "结构标签";
+                case "export":
+                    return "导出标签";
                 case "textBackend":
                     return "文本后端";
                 case "imageType":
@@ -3331,6 +5400,10 @@ namespace UGF.EditorTools.Psd2UGUI
                     return "handle";
                 case GUIType.ScrollView:
                     return "sv";
+                case GUIType.Panel:
+                    return "panel";
+                case GUIType.ToggleGroup:
+                    return "tgg";
                 case GUIType.ScrollView_Viewport:
                     return "vpt";
                 case GUIType.ScrollView_HorizontalBarBG:
@@ -3372,6 +5445,8 @@ namespace UGF.EditorTools.Psd2UGUI
                 case GUIType.Text:
                 case GUIType.Mask:
                 case GUIType.FillColor:
+                case GUIType.Panel:
+                case GUIType.ToggleGroup:
                 case GUIType.Button:
                 case GUIType.Dropdown:
                 case GUIType.InputField:
@@ -3414,7 +5489,7 @@ namespace UGF.EditorTools.Psd2UGUI
             return uiType == GUIType.Image || uiType == GUIType.RawImage;
         }
 
-        private static bool ShouldPsRasterizeAsImageRoleType(GUIType uiType)
+        private static bool ShouldPsRasterizeAsImageSemanticType(GUIType uiType)
         {
             switch (uiType)
             {
@@ -3467,6 +5542,17 @@ namespace UGF.EditorTools.Psd2UGUI
                 .Replace("\n", "\\n");
         }
 
+        private static string NormalizePsTooltipLabel(string label)
+        {
+            if (string.IsNullOrWhiteSpace(label)) return string.Empty;
+            return label
+                .Replace("\\r", " ")
+                .Replace("\\n", " ")
+                .Replace('\r', ' ')
+                .Replace('\n', ' ')
+                .Trim();
+        }
+
         private static void AddPsMenuItem(Dictionary<string, List<PsTagMenuItem>> familyItems, string familyKey, string canonicalId, string label)
         {
             if (string.IsNullOrWhiteSpace(familyKey) || string.IsNullOrWhiteSpace(canonicalId)) return;
@@ -3486,7 +5572,7 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 CanonicalId = canonicalId,
                 Suffix = "." + canonicalId,
-                Label = string.IsNullOrWhiteSpace(label) ? canonicalId : label
+                Label = string.IsNullOrWhiteSpace(label) ? canonicalId : NormalizePsTooltipLabel(label)
             });
         }
 
@@ -3494,6 +5580,7 @@ namespace UGF.EditorTools.Psd2UGUI
             Dictionary<string, PsTagAliasRule> aliasRules,
             string alias,
             string main = null,
+            string export = null,
             string role = null,
             string imageType = null,
             string textBackend = null)
@@ -3508,6 +5595,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             if (!string.IsNullOrWhiteSpace(main)) aliasRule.Main = main;
+            if (!string.IsNullOrWhiteSpace(export)) aliasRule.Export = export;
             if (!string.IsNullOrWhiteSpace(role)) aliasRule.Role = role;
             if (!string.IsNullOrWhiteSpace(imageType)) aliasRule.ImageType = imageType;
             if (!string.IsNullOrWhiteSpace(textBackend)) aliasRule.TextBackend = textBackend;
@@ -3527,7 +5615,7 @@ namespace UGF.EditorTools.Psd2UGUI
             var canonicalToken = GetCanonicalRuleToken(rule.UIType);
             var label = string.IsNullOrWhiteSpace(rule.UITypeDesc)
                 ? rule.UIType.ToString()
-                : $"{rule.UIType}\\n{rule.UITypeDesc}";
+                : $"{rule.UIType} {rule.UITypeDesc}";
 
             switch (rule.UIType)
             {
@@ -3542,6 +5630,15 @@ namespace UGF.EditorTools.Psd2UGUI
                     {
                         AddPsAliasRule(aliasRules, rule.TypeMatches[i], main: baseCanonicalToken, textBackend: "tmp");
                     }
+                    return;
+
+                case GUIType.Image:
+                    AddPsMenuItem(familyItems, "export", canonicalToken, label);
+                    for (int i = 0; i < rule.TypeMatches.Length; i++)
+                    {
+                        AddPsAliasRule(aliasRules, rule.TypeMatches[i], export: canonicalToken);
+                    }
+                    rasterizeAsImageConfig.ExportIds.Add(canonicalToken);
                     return;
             }
 
@@ -3570,7 +5667,7 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 rasterizeAsImageConfig.MainIds.Add(canonicalToken);
             }
-            else if (ShouldPsRasterizeAsImageRoleType(rule.UIType))
+            else if (ShouldPsRasterizeAsImageSemanticType(rule.UIType))
             {
                 rasterizeAsImageConfig.RoleIds.Add(canonicalToken);
             }
@@ -3590,24 +5687,28 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
             }
 
-            AddPsMenuItem(familyItems, "textBackend", "tmp", "TMP\\nTMP文本后端");
-            AddPsMenuItem(familyItems, "textBackend", "ugui", "UGUI\\n原生文本后端");
+            AddPsMenuItem(familyItems, "textBackend", "tmp", "TMP文本后端");
+            AddPsMenuItem(familyItems, "textBackend", "ugui", "原生文本后端");
             AddPsAliasRule(aliasRules, "tmp", textBackend: "tmp");
             AddPsAliasRule(aliasRules, "ugui", textBackend: "ugui");
 
-            AddPsMenuItem(familyItems, "imageType", "simple", "Simple\\n普通");
-            AddPsMenuItem(familyItems, "imageType", "sliced", "Sliced\\n九宫格");
-            AddPsMenuItem(familyItems, "imageType", "tiled", "Tiled\\n平铺");
-            AddPsMenuItem(familyItems, "imageType", "filled", "Filled\\n填充");
+            AddPsMenuItem(familyItems, "imageType", "simple", "普通");
+            AddPsMenuItem(familyItems, "imageType", "sliced", "九宫格");
+            AddPsMenuItem(familyItems, "imageType", "tiled", "平铺");
+            AddPsMenuItem(familyItems, "imageType", "filled", "填充");
             AddPsAliasRule(aliasRules, "simple", imageType: "simple");
             AddPsAliasRule(aliasRules, "sliced", imageType: "sliced");
             AddPsAliasRule(aliasRules, "tiled", imageType: "tiled");
             AddPsAliasRule(aliasRules, "filled", imageType: "filled");
 
-            var familyOrder = new[] { "main", "textBackend", "imageType", "role" };
+            var familyOrder = new[] { "export", "main", "textBackend", "imageType", "role" };
             var builder = new StringBuilder();
             builder.AppendLine("var TAG_CONFIG = {");
-            builder.AppendLine("    canonicalOrder: [\"main\", \"textBackend\", \"imageType\", \"role\"],");
+            builder.AppendLine("    canonicalOrder: [\"export\", \"main\", \"textBackend\", \"imageType\", \"role\"],");
+            builder.AppendLine("    reuseMarkers: [");
+            builder.AppendLine("        { \"id\": \"ref\", \"prefix\": \"ref \", \"label\": \"ref 复用共享图片资源\" },");
+            builder.AppendLine("        { \"id\": \"refp\", \"prefix\": \"refp \", \"label\": \"refp 复用共享预制体\" }");
+            builder.AppendLine("    ],");
             builder.AppendLine("    familyLabels: {");
             for (int familyIndex = 0; familyIndex < familyOrder.Length; familyIndex++)
             {
@@ -3671,6 +5772,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             AppendBooleanLookup("main", rasterizeAsImageConfig.MainIds, true);
+            AppendBooleanLookup("export", rasterizeAsImageConfig.ExportIds, true);
             AppendBooleanLookup("role", rasterizeAsImageConfig.RoleIds, false);
             builder.AppendLine("    },");
             builder.AppendLine("    aliasMap: {");
@@ -3690,6 +5792,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
 
                 AppendField("main", aliasRule.Main);
+                AppendField("export", aliasRule.Export);
                 AppendField("role", aliasRule.Role);
                 AppendField("imageType", aliasRule.ImageType);
                 AppendField("textBackend", aliasRule.TextBackend);
@@ -3701,27 +5804,451 @@ namespace UGF.EditorTools.Psd2UGUI
             return builder.ToString();
         }
 
-        private static bool ReplacePsTagConfigBlock(string scriptPath, string tagConfigBlock, out string error)
+        private string BuildPsReuseDefaultSettingsBlock()
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("var REUSE_DEFAULT_SETTINGS = {");
+            builder.Append("    imageRoot: \"")
+                .Append(EscapeJsString(GetPhotoshopDefaultReuseDirectory(sharedAssetsOutput)))
+                .AppendLine("\",");
+            builder.Append("    prefabRoot: \"")
+                .Append(EscapeJsString(GetPhotoshopDefaultReuseDirectory(sharedPrefabOutput)))
+                .AppendLine("\"");
+            builder.Append("};");
+            return builder.ToString();
+        }
+
+        private static string GetPhotoshopDefaultReuseDirectory(string configuredPath)
+        {
+            if (string.IsNullOrWhiteSpace(configuredPath))
+            {
+                return string.Empty;
+            }
+
+            var normalizedPath = configuredPath.Trim();
+            string fullPath;
+            if (Path.IsPathRooted(normalizedPath))
+            {
+                fullPath = normalizedPath;
+            }
+            else
+            {
+                var projectRoot = Directory.GetParent(Application.dataPath)?.FullName;
+                if (string.IsNullOrWhiteSpace(projectRoot))
+                {
+                    return string.Empty;
+                }
+
+                fullPath = Path.GetFullPath(Path.Combine(projectRoot, normalizedPath));
+            }
+
+            return fullPath.Replace('\\', '/');
+        }
+
+        private static bool ReplaceScriptBlock(string scriptPath, string blockPattern, string replacementBlock, string blockName, out string error)
         {
             error = null;
-            if (!File.Exists(scriptPath))
+            string fullPath = Psd2UIFormPluginPathUtility.AssetPathToAbsolutePath(scriptPath);
+            if (!File.Exists(fullPath))
             {
-                error = $"PS script file does not exist:\n{scriptPath}";
+                error = $"PS脚本文件不存在：\n{scriptPath}";
                 return false;
             }
 
-            var scriptContent = File.ReadAllText(scriptPath, Encoding.UTF8);
-            var configPattern = new Regex(@"var\s+TAG_CONFIG\s*=\s*\{[\s\S]*?\};", RegexOptions.Multiline);
+            var scriptContent = File.ReadAllText(fullPath, Encoding.UTF8);
+            var configPattern = new Regex(blockPattern, RegexOptions.Multiline);
             if (!configPattern.IsMatch(scriptContent))
             {
-                error = $"TAG_CONFIG was not found in PS script:\n{scriptPath}";
+                error = $"PS脚本中未找到 {blockName}：\n{scriptPath}";
                 return false;
             }
 
-            var newContent = configPattern.Replace(scriptContent, tagConfigBlock, 1);
-            File.WriteAllText(scriptPath, newContent, Encoding.UTF8);
+            var newContent = configPattern.Replace(scriptContent, replacementBlock, 1);
+            File.WriteAllText(fullPath, newContent, Encoding.UTF8);
             AssetDatabase.ImportAsset(scriptPath);
             return true;
+        }
+
+        private static bool ReplacePsTagConfigBlock(string scriptPath, string tagConfigBlock, out string error)
+        {
+            return ReplaceScriptBlock(scriptPath, @"var\s+TAG_CONFIG\s*=\s*\{[\s\S]*?\};", tagConfigBlock, "TAG_CONFIG", out error);
+        }
+
+        private static bool ReplacePsReuseDefaultSettingsBlock(string scriptPath, string reuseDefaultsBlock, out string error)
+        {
+            return ReplaceScriptBlock(scriptPath, @"var\s+REUSE_DEFAULT_SETTINGS\s*=\s*\{[\s\S]*?\};", reuseDefaultsBlock, "REUSE_DEFAULT_SETTINGS", out error);
+        }
+
+        private static string NormalizeRegistryPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return null;
+            }
+
+            var normalized = Environment.ExpandEnvironmentVariables(path.Trim().Trim('"'));
+            if (normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                normalized = Path.GetDirectoryName(normalized);
+            }
+
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return null;
+            }
+
+            try
+            {
+                return Path.GetFullPath(normalized);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void TryAddPhotoshopInstallDirectory(HashSet<string> installDirectories, string path)
+        {
+            var normalized = NormalizeRegistryPath(path);
+            if (string.IsNullOrWhiteSpace(normalized) || !Directory.Exists(normalized))
+            {
+                return;
+            }
+
+            installDirectories.Add(normalized);
+        }
+
+        private static Type ResolveType(string fullName)
+        {
+            var type = Type.GetType(fullName);
+            if (type != null)
+            {
+                return type;
+            }
+
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            for (int i = 0; i < assemblies.Length; i++)
+            {
+                type = assemblies[i].GetType(fullName, false);
+                if (type != null)
+                {
+                    return type;
+                }
+            }
+
+            return null;
+        }
+
+        private static object ParseEnumValue(Type enumType, string name)
+        {
+            return enumType == null ? null : Enum.Parse(enumType, name);
+        }
+
+        private static object InvokeRegistryMethod(object target, string methodName, Type[] parameterTypes, params object[] args)
+        {
+            if (target == null)
+            {
+                return null;
+            }
+
+            var targetType = target as Type ?? target.GetType();
+            var method = parameterTypes == null
+                ? targetType.GetMethod(methodName)
+                : targetType.GetMethod(methodName, parameterTypes);
+            return method?.Invoke(target is Type ? null : target, args);
+        }
+
+        private static string GetRegistryValue(object key, string valueName)
+        {
+            return InvokeRegistryMethod(key, "GetValue", new[] { typeof(string) }, valueName) as string;
+        }
+
+        private static object OpenRegistrySubKey(object key, string subKeyName)
+        {
+            return InvokeRegistryMethod(key, "OpenSubKey", new[] { typeof(string) }, subKeyName);
+        }
+
+        private static string[] GetRegistrySubKeyNames(object key)
+        {
+            return InvokeRegistryMethod(key, "GetSubKeyNames", Type.EmptyTypes) as string[] ?? Array.Empty<string>();
+        }
+
+        private static object OpenRegistryBaseKey(string hiveName, string viewName)
+        {
+            var registryKeyType = ResolveType("Microsoft.Win32.RegistryKey");
+            var registryHiveType = ResolveType("Microsoft.Win32.RegistryHive");
+            var registryViewType = ResolveType("Microsoft.Win32.RegistryView");
+            if (registryKeyType == null || registryHiveType == null || registryViewType == null)
+            {
+                return null;
+            }
+
+            var hive = ParseEnumValue(registryHiveType, hiveName);
+            var view = ParseEnumValue(registryViewType, viewName);
+            if (hive == null || view == null)
+            {
+                return null;
+            }
+
+            return InvokeRegistryMethod(
+                registryKeyType,
+                "OpenBaseKey",
+                new[] { registryHiveType, registryViewType },
+                hive,
+                view);
+        }
+
+        private static void TryCollectPhotoshopInstallDirectory(object key, HashSet<string> installDirectories)
+        {
+            if (key == null)
+            {
+                return;
+            }
+
+            TryAddPhotoshopInstallDirectory(installDirectories, GetRegistryValue(key, "ApplicationPath"));
+            TryAddPhotoshopInstallDirectory(installDirectories, GetRegistryValue(key, "InstallPath"));
+            TryAddPhotoshopInstallDirectory(installDirectories, GetRegistryValue(key, "Path"));
+            TryAddPhotoshopInstallDirectory(installDirectories, GetRegistryValue(key, null));
+        }
+
+        private static void CollectPhotoshopInstallsFromAdobeRegistry(string hiveName, string viewName, HashSet<string> installDirectories)
+        {
+            var baseKey = OpenRegistryBaseKey(hiveName, viewName);
+            if (baseKey == null)
+            {
+                return;
+            }
+
+            using (baseKey as IDisposable)
+            {
+                var photoshopRoot = OpenRegistrySubKey(baseKey, @"SOFTWARE\Adobe\Photoshop");
+                if (photoshopRoot == null)
+                {
+                    return;
+                }
+
+                using (photoshopRoot as IDisposable)
+                {
+                    var versionKeys = GetRegistrySubKeyNames(photoshopRoot);
+                    for (int i = 0; i < versionKeys.Length; i++)
+                    {
+                        var versionKey = OpenRegistrySubKey(photoshopRoot, versionKeys[i]);
+                        using (versionKey as IDisposable)
+                        {
+                            TryCollectPhotoshopInstallDirectory(versionKey, installDirectories);
+
+                            var applicationPathKey = versionKey == null ? null : OpenRegistrySubKey(versionKey, "ApplicationPath");
+                            using (applicationPathKey as IDisposable)
+                            {
+                                TryCollectPhotoshopInstallDirectory(applicationPathKey, installDirectories);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void CollectPhotoshopInstallsFromUninstallRegistry(string hiveName, string viewName, HashSet<string> installDirectories)
+        {
+            var baseKey = OpenRegistryBaseKey(hiveName, viewName);
+            if (baseKey == null)
+            {
+                return;
+            }
+
+            using (baseKey as IDisposable)
+            {
+                var uninstallRoot = OpenRegistrySubKey(baseKey, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall");
+                if (uninstallRoot == null)
+                {
+                    return;
+                }
+
+                using (uninstallRoot as IDisposable)
+                {
+                    var subKeyNames = GetRegistrySubKeyNames(uninstallRoot);
+                    for (int i = 0; i < subKeyNames.Length; i++)
+                    {
+                        var subKey = OpenRegistrySubKey(uninstallRoot, subKeyNames[i]);
+                        using (subKey as IDisposable)
+                        {
+                            var displayName = GetRegistryValue(subKey, "DisplayName");
+                            if (string.IsNullOrWhiteSpace(displayName) ||
+                                displayName.IndexOf("Adobe Photoshop", StringComparison.OrdinalIgnoreCase) < 0)
+                            {
+                                continue;
+                            }
+
+                            TryAddPhotoshopInstallDirectory(installDirectories, GetRegistryValue(subKey, "InstallLocation"));
+                            TryAddPhotoshopInstallDirectory(installDirectories, GetRegistryValue(subKey, "DisplayIcon"));
+                        }
+                    }
+                }
+            }
+        }
+
+        private static string[] FindPhotoshopScriptDirectories()
+        {
+            if (Application.platform == RuntimePlatform.OSXEditor)
+            {
+                return FindPhotoshopScriptDirectoriesOnMac();
+            }
+
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+            {
+                return Array.Empty<string>();
+            }
+
+            var installDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var hives = new[] { "LocalMachine", "CurrentUser" };
+            var views = new[] { "Registry64", "Registry32" };
+
+            for (int hiveIndex = 0; hiveIndex < hives.Length; hiveIndex++)
+            {
+                for (int viewIndex = 0; viewIndex < views.Length; viewIndex++)
+                {
+                    try
+                    {
+                        CollectPhotoshopInstallsFromAdobeRegistry(hives[hiveIndex], views[viewIndex], installDirectories);
+                    }
+                    catch
+                    {
+                    }
+
+                    try
+                    {
+                        CollectPhotoshopInstallsFromUninstallRegistry(hives[hiveIndex], views[viewIndex], installDirectories);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
+            return installDirectories
+                .Select(path => Path.Combine(path, "Presets", "Scripts"))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static string[] FindPhotoshopScriptDirectoriesOnMac()
+        {
+            var scriptDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var appDirectories = new List<string>();
+
+            try
+            {
+                if (Directory.Exists("/Applications"))
+                {
+                    appDirectories.AddRange(Directory.GetDirectories("/Applications", "Adobe Photoshop*.app", SearchOption.TopDirectoryOnly));
+                }
+            }
+            catch
+            {
+            }
+
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!string.IsNullOrWhiteSpace(home))
+            {
+                string userApplications = Path.Combine(home, "Applications");
+                try
+                {
+                    if (Directory.Exists(userApplications))
+                    {
+                        appDirectories.AddRange(Directory.GetDirectories(userApplications, "Adobe Photoshop*.app", SearchOption.TopDirectoryOnly));
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            for (int i = 0; i < appDirectories.Count; i++)
+            {
+                TryAddMacPhotoshopScriptDirectory(scriptDirectories, appDirectories[i]);
+            }
+
+            return scriptDirectories
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static void TryAddMacPhotoshopScriptDirectory(HashSet<string> scriptDirectories, string appBundlePath)
+        {
+            if (scriptDirectories == null || string.IsNullOrWhiteSpace(appBundlePath))
+            {
+                return;
+            }
+
+            var candidates = new[]
+            {
+                Path.Combine(appBundlePath, "Presets", "Scripts"),
+                Path.Combine(appBundlePath, "Contents", "Required", "Presets", "Scripts"),
+                Path.Combine(appBundlePath, "Contents", "Resources", "Presets", "Scripts")
+            };
+
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                string candidate = candidates[i];
+                if (!Directory.Exists(candidate))
+                {
+                    continue;
+                }
+
+                scriptDirectories.Add(candidate);
+            }
+        }
+
+        private static void DeployScriptsToPhotoshop(out List<string> deployedScriptDirectories, out List<string> deployErrors)
+        {
+            deployedScriptDirectories = new List<string>();
+            deployErrors = new List<string>();
+
+            var scriptDirectories = FindPhotoshopScriptDirectories();
+            if (scriptDirectories.Length == 0)
+            {
+                deployErrors.Add("未找到 Photoshop 安装目录，已只更新工程内 jsx 文件。");
+                return;
+            }
+
+            var sourceScriptPaths = new[]
+            {
+                Psd2UIFormPluginPathUtility.GetPluginAbsolutePath(LayerTagMenuScriptRelativePath),
+                Psd2UIFormPluginPathUtility.GetPluginAbsolutePath(LayerExportScriptRelativePath)
+            };
+
+            for (int i = 0; i < sourceScriptPaths.Length; i++)
+            {
+                if (string.IsNullOrWhiteSpace(sourceScriptPaths[i]) || !File.Exists(sourceScriptPaths[i]))
+                {
+                    deployErrors.Add($"本地脚本不存在，无法自动部署：\n{sourceScriptPaths[i] ?? "(null)"}");
+                    return;
+                }
+            }
+
+            for (int dirIndex = 0; dirIndex < scriptDirectories.Length; dirIndex++)
+            {
+                var scriptDirectory = scriptDirectories[dirIndex];
+
+                try
+                {
+                    Directory.CreateDirectory(scriptDirectory);
+
+                    for (int fileIndex = 0; fileIndex < sourceScriptPaths.Length; fileIndex++)
+                    {
+                        var sourcePath = sourceScriptPaths[fileIndex];
+                        var targetPath = Path.Combine(scriptDirectory, Path.GetFileName(sourcePath));
+                        File.Copy(sourcePath, targetPath, true);
+                    }
+
+                    deployedScriptDirectories.Add(scriptDirectory);
+                }
+                catch (Exception ex)
+                {
+                    deployErrors.Add($"覆盖 Photoshop 脚本目录失败：\n{scriptDirectory}\n{ex.Message}");
+                }
+            }
         }
 
         internal void ExportLayerTagMenuConfig()
@@ -3732,8 +6259,11 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             var tagConfigBlock = BuildPsTagConfigBlock();
+            var reuseDefaultsBlock = BuildPsReuseDefaultSettingsBlock();
             var errors = new List<string>();
-            var targetScripts = new[] { LayerTagMenuScriptPath, LayerExportScriptPath };
+            var layerTagMenuScriptPath = Psd2UIFormPluginPathUtility.GetPluginAssetPath(LayerTagMenuScriptRelativePath);
+            var layerExportScriptPath = Psd2UIFormPluginPathUtility.GetPluginAssetPath(LayerExportScriptRelativePath);
+            var targetScripts = new[] { layerTagMenuScriptPath, layerExportScriptPath };
             for (int i = 0; i < targetScripts.Length; i++)
             {
                 var scriptPath = targetScripts[i];
@@ -3743,20 +6273,110 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
             }
 
+            if (!ReplacePsReuseDefaultSettingsBlock(layerTagMenuScriptPath, reuseDefaultsBlock, out var reuseDefaultsError))
+            {
+                errors.Add(reuseDefaultsError);
+            }
+
             if (errors.Count > 0)
             {
-                EditorUtility.DisplayDialog("Export Rules Failed", string.Join("\n\n", errors), "OK");
+                EditorUtility.DisplayDialog("导出PS脚本工具 失败", string.Join("\n\n", errors), "确定");
                 return;
             }
 
-            EditorUtility.DisplayDialog("Export Rules Succeeded", string.Join("\n", targetScripts), "OK");
-            Selection.activeObject = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(LayerTagMenuScriptPath);
+            DeployScriptsToPhotoshop(out var deployedScriptDirectories, out var deployErrors);
+
+            var messageBuilder = new StringBuilder();
+            messageBuilder.AppendLine("工程内脚本已更新：");
+            for (int i = 0; i < targetScripts.Length; i++)
+            {
+                messageBuilder.AppendLine(targetScripts[i]);
+            }
+
+            if (deployedScriptDirectories.Count > 0)
+            {
+                messageBuilder.AppendLine();
+                messageBuilder.AppendLine("已覆盖 Photoshop 脚本目录：");
+                for (int i = 0; i < deployedScriptDirectories.Count; i++)
+                {
+                    messageBuilder.AppendLine(deployedScriptDirectories[i]);
+                }
+            }
+
+            if (deployErrors.Count > 0)
+            {
+                messageBuilder.AppendLine();
+                messageBuilder.AppendLine("自动部署存在以下问题：");
+                for (int i = 0; i < deployErrors.Count; i++)
+                {
+                    messageBuilder.AppendLine(deployErrors[i]);
+                }
+            }
+
+            EditorUtility.DisplayDialog(
+                deployErrors.Count > 0 ? "导出PS脚本工具 完成" : "导出PS脚本工具 成功",
+                messageBuilder.ToString(),
+                "确定");
+            Selection.activeObject = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(layerTagMenuScriptPath);
         }
     }
     internal struct TextGradientStop
     {
         public float Location;
         public Color Color;
+    }
+    internal struct TextStyleRunInfo
+    {
+        public int Start;
+        public int Length;
+        public string FontName;
+        public float FontSize;
+        public Color Color;
+        public FontStyle FontStyle;
+        public TMPro.FontStyles TMPFontStyle;
+        public float CharacterSpacing;
+        public float LineSpacing;
+        public bool IsAutoLineSpacing;
+        public float BaselineShift;
+        public float HorizontalScale;
+        public bool AutoKerning;
+        public float Kerning;
+        public bool Ligatures;
+        public bool NoBreak;
+        public cn.efunstudio.psdreader.PsdParser.PsdTextCapitalization Capitalization;
+    }
+    internal struct TextParagraphRunInfo
+    {
+        public int Start;
+        public int Length;
+        public cn.efunstudio.psdreader.PsdParser.PsdTextJustification Justification;
+        public float FirstLineIndent;
+        public float StartIndent;
+        public float EndIndent;
+        public float SpaceBefore;
+        public float SpaceAfter;
+        public bool AutoHyphenate;
+    }
+    internal struct TextEffectContourPoint
+    {
+        public float Input;
+        public float Output;
+    }
+    internal struct TextGlowEffectInfo
+    {
+        public bool Enabled;
+        public bool Inner;
+        public Color Color;
+        public float Size;
+        public float Spread;
+        public string BlendModeKey;
+        public string TechniqueKey;
+        public string SourceKey;
+        public float Noise;
+        public float Jitter;
+        public float Range;
+        public bool AntiAlias;
+        public TextEffectContourPoint[] Contour;
     }
         internal struct TextLayerInfo
         {
@@ -3768,7 +6388,12 @@ namespace UGF.EditorTools.Psd2UGUI
             Outside = 2
         }
         public string Text;
-        public int FontSize;
+        public bool IsParagraphText;
+        public float LayerOpacity;
+        public float FillOpacity;
+        public TextStyleRunInfo[] StyleRuns;
+        public TextParagraphRunInfo[] ParagraphRuns;
+        public float FontSize;
         public bool IsAutoLineSpacing;
         public float LineSpacing;
         public float CharacterSpacing;
@@ -3776,24 +6401,25 @@ namespace UGF.EditorTools.Psd2UGUI
         public FontStyle FontStyle;
         public TMPro.FontStyles TMPFontStyle;
         public string FontName;
+        public cn.efunstudio.psdreader.PsdParser.PsdTextJustification Justification;
+        public bool AutoKerning;
         public bool HasOutline;
         public Color OutlineColor;
         public float OutlineSize;
         public float TMPOutlineSize;
         public TMPOutlineMode TMPOutlinePosition;
+        public string OutlineBlendModeKey;
         public bool HasShadow;
         public bool ShadowIsInner;
         public Color ShadowColor;
         public Vector2 ShadowOffset;
         public float ShadowSpread;
         public float ShadowSoftness;
-        public bool HasGlow;
-        public bool GlowIsInner;
-        public Color GlowColor;
-        public float GlowSize;
-        public float GlowSpread;
-        public float GlowOffset;
-        public float GlowPower;
+        public string ShadowBlendModeKey;
+        public TextEffectContourPoint[] ShadowContour;
+        public TextGlowEffectInfo OuterGlow;
+        public TextGlowEffectInfo InnerGlow;
+        public bool HasGlow => OuterGlow.Enabled || InnerGlow.Enabled;
         public bool HasBevel;
         public bool BevelIsInner;
         public float BevelSize;
@@ -3801,15 +6427,26 @@ namespace UGF.EditorTools.Psd2UGUI
         public float BevelSoften;
         public float BevelAngle;
         public float BevelAltitude;
+        public string BevelTechniqueKey;
+        public string BevelDirectionKey;
+        public string BevelHighlightBlendModeKey;
+        public string BevelShadowBlendModeKey;
         public Color BevelHighlightColor;
         public float BevelHighlightOpacity;
         public Color BevelShadowColor;
         public float BevelShadowOpacity;
+        public TextEffectContourPoint[] BevelGlossContour;
         public bool HasGradient;
         public float GradientAngle;
         public bool GradientReverse;
+        public float GradientOpacity;
+        public float GradientScale;
+        public Vector2 GradientOffset;
+        public bool GradientAlignWithLayer;
+        public bool GradientDither;
         public string GradientStyleKey;
         public string GradientBlendModeKey;
+        public string GradientInterpolationKey;
         public TextGradientStop[] GradientStops;
     }
     internal static class LayerNameUtility

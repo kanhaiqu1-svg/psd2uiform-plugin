@@ -43,9 +43,9 @@ namespace UGF.EditorTools.Psd2UGUI
 
         internal override void ParseAndAttachUIElements()
         {
-            background = LayerNode.FindSubLayerNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
-            placeholder = LayerNode.FindSubLayerNode(GUIType.InputField_Placeholder);
-            text = LayerNode.FindSubLayerNode(GUIType.InputField_Text, GUIType.Text);
+            background = FindOwnedNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
+            placeholder = FindOwnedNode(GUIType.InputField_Placeholder);
+            text = FindOwnedNode(GUIType.InputField_Text, GUIType.Text);
         }
 
         protected override void InitUIElements(GameObject uiRoot)
@@ -55,11 +55,13 @@ namespace UGF.EditorTools.Psd2UGUI
 
             var bgImage = input.targetGraphic as Image;
             UGUIParser.Instance.BindImage(background, bgImage);
-            UGUIParser.SetRectTransform(placeholder, input.placeholder);
-            UGUIParser.SetRectTransform(text, input.textComponent);
             UGUIParser.SetTextStyle(placeholder, input.placeholder as Text);
             var textInfo = UGUIParser.SetTextStyle(text, input.textComponent);
+            var inputBounds = background != null ? background : LayerNode;
+            UGUIParser.SetInputFieldTextRectTransform(inputBounds, placeholder, input.placeholder);
+            UGUIParser.SetInputFieldTextRectTransform(inputBounds, text, input.textComponent);
             input.text = textInfo.Text;
+            input.ForceLabelUpdate();
         }
     }
 }

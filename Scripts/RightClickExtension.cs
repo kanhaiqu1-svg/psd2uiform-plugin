@@ -19,11 +19,13 @@ using UnityEngine;
 
 namespace UGF.EditorTools.Psd2UGUI
 {
+    [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     internal static class RightClickExtension
     {
         private const string CropMinimalNineSliceMenuPath = "Assets/Psd2UIForm/Crop Minimal 9-Slice";
 
         [MenuItem("Assets/Psd2UIForm/Auto Sprite Border", priority = 1004)]
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         private static void AutoSpriteSliceBorder()
         {
             foreach (var guid in Selection.assetGUIDs)
@@ -54,6 +56,7 @@ namespace UGF.EditorTools.Psd2UGUI
         }
 
         [MenuItem(CropMinimalNineSliceMenuPath, priority = 1005)]
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         private static void CropMinimalNineSlice()
         {
             int successCount = 0;
@@ -62,13 +65,19 @@ namespace UGF.EditorTools.Psd2UGUI
             foreach (var guid in Selection.assetGUIDs)
             {
                 var assetPath = AssetDatabase.GUIDToAssetPath(guid);
-                if (TryCropMinimalNineSlice(assetPath))
+                if (AssetDatabase.IsValidFolder(assetPath))
                 {
-                    successCount++;
+                    foreach (var subGuid in AssetDatabase.FindAssets("t:Texture2D", new[] { assetPath }))
+                    {
+                        var subPath = AssetDatabase.GUIDToAssetPath(subGuid);
+                        if (TryCropMinimalNineSlice(subPath)) successCount++;
+                        else skipCount++;
+                    }
                 }
                 else
                 {
-                    skipCount++;
+                    if (TryCropMinimalNineSlice(assetPath)) successCount++;
+                    else skipCount++;
                 }
             }
 
@@ -79,11 +88,17 @@ namespace UGF.EditorTools.Psd2UGUI
         }
 
         [MenuItem(CropMinimalNineSliceMenuPath, true)]
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         private static bool ValidateCropMinimalNineSlice()
         {
             foreach (var guid in Selection.assetGUIDs)
             {
                 var assetPath = AssetDatabase.GUIDToAssetPath(guid);
+                if (AssetDatabase.IsValidFolder(assetPath))
+                {
+                    return true;
+                }
+
                 var texImporter = AssetImporter.GetAtPath(assetPath) as TextureImporter;
                 if (texImporter != null &&
                     texImporter.textureType == TextureImporterType.Sprite &&
@@ -98,7 +113,6 @@ namespace UGF.EditorTools.Psd2UGUI
 
         internal static bool TryCropMinimalNineSlice(string assetPath)
         {
-            assetPath = Psd2UIFormConverter.NormalizeToAssetPath(assetPath);
             var texImporter = AssetImporter.GetAtPath(assetPath) as TextureImporter;
             if (texImporter == null || texImporter.textureType != TextureImporterType.Sprite)
             {
@@ -205,13 +219,8 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
 
                 Vector4 newBorder = new Vector4(left, bottom, right, top);
-                bool needSave = texImporter.spriteBorder != newBorder
-                    || texImporter.textureType != TextureImporterType.Sprite
-                    || texImporter.spriteImportMode != SpriteImportMode.Single;
-                if (needSave)
+                if (texImporter.spriteBorder != newBorder)
                 {
-                    texImporter.textureType = TextureImporterType.Sprite;
-                    texImporter.spriteImportMode = SpriteImportMode.Single;
                     texImporter.spriteBorder = newBorder;
                     texImporter.SaveAndReimport();
                 }

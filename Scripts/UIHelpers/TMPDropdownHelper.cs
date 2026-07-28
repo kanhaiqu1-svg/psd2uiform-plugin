@@ -46,11 +46,11 @@ namespace UGF.EditorTools.Psd2UGUI
 
         internal override void ParseAndAttachUIElements()
         {
-            background = LayerNode.FindSubLayerNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
-            label = LayerNode.FindSubLayerNode(GUIType.Dropdown_Label, GUIType.TMPText);
-            arrow = LayerNode.FindSubLayerNode(GUIType.Dropdown_Arrow);
-            scrollView = LayerNode.FindSubLayerNode(GUIType.ScrollView);
-            toggleItem = LayerNode.FindSubLayerNode(GUIType.TMPToggle, GUIType.Toggle);
+            background = FindOwnedNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
+            label = FindOwnedNode(GUIType.Dropdown_Label, GUIType.Text);
+            arrow = FindOwnedNode(GUIType.Dropdown_Arrow);
+            scrollView = FindOwnedNode(GUIType.ScrollView);
+            toggleItem = FindOwnedNode(GUIType.TMPToggle, GUIType.Toggle);
         }
 
         protected override void InitUIElements(GameObject uiRoot)
@@ -60,8 +60,14 @@ namespace UGF.EditorTools.Psd2UGUI
             var bgImg = dpd.targetGraphic as Image;
             UGUIParser.Instance.BindImage(background, bgImg);
 
-            UGUIParser.SetTextStyle(label, dpd.captionText as TextMeshProUGUI);
-            UGUIParser.SetRectTransform(label, dpd.captionText);
+            var captionText = dpd.captionText as TextMeshProUGUI;
+            UGUIParser.SetTextStyle(label, captionText);
+            if (captionText != null)
+            {
+                captionText.verticalAlignment = VerticalAlignmentOptions.Geometry;
+            }
+            UGUIParser.SetTextRectTransform(label, dpd.captionText);
+            UGUIParser.SetTextRotation(label, dpd.captionText);
             var arrowImg = dpd.transform.Find("Arrow")?.GetComponent<Image>();
             if (arrowImg != null)
             {

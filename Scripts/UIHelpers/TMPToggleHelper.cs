@@ -42,9 +42,9 @@ namespace UGF.EditorTools.Psd2UGUI
 
         internal override void ParseAndAttachUIElements()
         {
-            background = LayerNode.FindSubLayerNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
-            checkmark = LayerNode.FindSubLayerNode(GUIType.Toggle_Checkmark);
-            label = LayerNode.FindSubLayerNode(GUIType.Toggle_Label, GUIType.TMPText, GUIType.Text);
+            background = FindOwnedNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
+            checkmark = FindOwnedNode(GUIType.Toggle_Checkmark);
+            label = FindOwnedNode(GUIType.Toggle_Label, GUIType.Text);
         }
 
         protected override void InitUIElements(GameObject uiRoot)
@@ -72,7 +72,16 @@ namespace UGF.EditorTools.Psd2UGUI
                 textCom.gameObject.SetActive(label != null);
             }
             UGUIParser.SetTextStyle(label, textCom);
-            UGUIParser.SetRectTransform(label, textCom, true, true, true);
+            UGUIParser.SetTextRectTransform(label, textCom);
+            UGUIParser.SetTextRotation(label, textCom);
+        }
+
+        internal override void OnUIParented(GameObject uiRoot)
+        {
+            var toggle = uiRoot != null ? uiRoot.GetComponent<UnityEngine.UI.Toggle>() : null;
+            if (toggle == null) return;
+
+            toggle.group = FindParentComponent<UnityEngine.UI.ToggleGroup>(uiRoot.transform.parent);
         }
     }
 }

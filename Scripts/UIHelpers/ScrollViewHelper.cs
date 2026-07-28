@@ -48,12 +48,12 @@ namespace UGF.EditorTools.Psd2UGUI
 
         internal override void ParseAndAttachUIElements()
         {
-            background = LayerNode.FindSubLayerNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
-            viewport = LayerNode.FindSubLayerNode(GUIType.ScrollView_Viewport, GUIType.Mask);
-            horizontalBarBG = LayerNode.FindSubLayerNode(GUIType.ScrollView_HorizontalBarBG);
-            horizontalBar = LayerNode.FindSubLayerNode(GUIType.ScrollView_HorizontalBar);
-            verticalBarBG = LayerNode.FindSubLayerNode(GUIType.ScrollView_VerticalBarBG);
-            verticalBar = LayerNode.FindSubLayerNode(GUIType.ScrollView_VerticalBar);
+            background = FindOwnedNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
+            viewport = FindOwnedNode(GUIType.ScrollView_Viewport);
+            horizontalBarBG = FindOwnedNode(GUIType.ScrollView_HorizontalBarBG);
+            horizontalBar = FindOwnedNode(GUIType.ScrollView_HorizontalBar);
+            verticalBarBG = FindOwnedNode(GUIType.ScrollView_VerticalBarBG);
+            verticalBar = FindOwnedNode(GUIType.ScrollView_VerticalBar);
         }
 
         protected override void InitUIElements(GameObject uiRoot)

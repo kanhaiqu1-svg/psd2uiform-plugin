@@ -55,12 +55,12 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (LayerNode.LayerType == PsdLayerType.LayerGroup)
             {
-                background = LayerNode.FindSubLayerNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
-                text = LayerNode.FindSubLayerNode(GUIType.Button_Text, GUIType.TMPText, GUIType.Text);
-                highlight = LayerNode.FindSubLayerNode(GUIType.Button_Highlight);
-                press = LayerNode.FindSubLayerNode(GUIType.Button_Press);
-                select = LayerNode.FindSubLayerNode(GUIType.Button_Select);
-                disable = LayerNode.FindSubLayerNode(GUIType.Button_Disable);
+            background = FindOwnedNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
+            text = FindOwnedNode(GUIType.Button_Text, GUIType.Text);
+            highlight = FindOwnedNode(GUIType.Button_Highlight);
+            press = FindOwnedNode(GUIType.Button_Press);
+            select = FindOwnedNode(GUIType.Button_Select);
+            disable = FindOwnedNode(GUIType.Button_Disable);
             }
             else
             {
@@ -77,9 +77,10 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             var button = uiRoot.GetComponent<Button>();
             var btImg = button.GetComponent<Image>();
+            var rectSource = background != null ? background : LayerNode;
             UGUIParser.Instance.BindImage(background, btImg);
-            UGUIParser.SetRectTransform(LayerNode, button);
-            var textCom = uiRoot.GetComponentInChildren<TextMeshProUGUI>(true);
+            UGUIParser.SetRectTransform(rectSource, button);
+            var textCom = FindTemplateText(uiRoot);
             if (text == null)
             {
                 if (textCom != null)
@@ -91,7 +92,8 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 textCom = textCom ?? CreateTemplateText(uiRoot);
                 UGUIParser.SetTextStyle(text, textCom);
-                UGUIParser.SetRectTransform(text, textCom);
+                UGUIParser.SetTextRectTransform(text, textCom);
+                UGUIParser.SetTextRotation(text, textCom);
             }
 
             bool useSpriteSwap = highlight != null || press != null || select != null || disable != null;
@@ -118,6 +120,22 @@ namespace UGF.EditorTools.Psd2UGUI
             textGo.name = prefabText.gameObject.name;
             textGo.transform.SetAsLastSibling();
             return textGo.GetComponent<TextMeshProUGUI>();
+        }
+
+        private static TextMeshProUGUI FindTemplateText(GameObject uiRoot)
+        {
+            if (uiRoot == null) return null;
+
+            var root = uiRoot.transform;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                var child = root.GetChild(i);
+                if (child == null || child.GetComponent<PsdGeneratedKey>() != null) continue;
+
+                var text = child.GetComponent<TextMeshProUGUI>();
+                if (text != null) return text;
+            }
+            return null;
         }
     }
 }
