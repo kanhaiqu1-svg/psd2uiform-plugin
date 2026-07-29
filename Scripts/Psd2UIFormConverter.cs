@@ -610,6 +610,8 @@ namespace UGF.EditorTools.Psd2UGUI
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         private void OnSceneGUI(SceneView view)
         {
+            if (this == null) return;
+
             var e = Event.current;
             if (e != null && e.type == EventType.MouseUp && e.button == 0)
             {
@@ -763,6 +765,7 @@ namespace UGF.EditorTools.Psd2UGUI
 #endif
             Rect selectionRect)
         {
+            if (this == null) return;
             if (Event.current == null) return;
             var node = HierarchyIdToGameObject(
 #if UNITY_6000_0_OR_NEWER
@@ -870,7 +873,7 @@ namespace UGF.EditorTools.Psd2UGUI
         }
 
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
-        private void OnDestroy()
+        private void OnDisable()
         {
             SceneView.duringSceneGui -= OnSceneGUI;
 #if UNITY_6000_0_OR_NEWER
@@ -878,6 +881,12 @@ namespace UGF.EditorTools.Psd2UGUI
 #else
             EditorApplication.hierarchyWindowItemOnGUI -= OnHierarchyGUI;
 #endif
+        }
+
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
+        private void OnDestroy()
+        {
+            OnDisable();
             if (this.psdInstance != null)
             {
                 psdInstance.Dispose();
