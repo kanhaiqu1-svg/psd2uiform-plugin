@@ -915,6 +915,16 @@ namespace UGF.EditorTools.Psd2UGUI
                 layer.InitPsdLayers(psdInstance);
             }
 
+            // Fatcat定制: 打开/刷新时若显示图丢失则重新加载(内存Sprite无法序列化进prefab, 沿用旧版行为)
+            if (this.psdAsset == null && !string.IsNullOrWhiteSpace(PsdAssetName))
+            {
+                this.psdAsset = LoadPsdSpriteAsset(PsdAssetName);
+                if (!IsPsbSourceDocument(PsdAssetName))
+                {
+                    this.previewSprite = null;
+                }
+            }
+
             RefreshDocumentPreviewSprite(psdInstance);
             ApplyDisplaySprite();
         }
