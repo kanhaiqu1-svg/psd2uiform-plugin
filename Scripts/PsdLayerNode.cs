@@ -27,7 +27,7 @@ using UnityEditor;
 using UnityEditorInternal;
 using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
+using System.Text.RegularExpressions; // Fatcat定制: R后缀缩放解析需要
 using cn.efunstudio.psdreader;
 using cn.efunstudio.psdreader.PsdParser;
 
@@ -1067,7 +1067,7 @@ namespace UGF.EditorTools.Psd2UGUI
 #endif
                 assetName = imgFileName;
                 AssetDatabase.Refresh();
-                Psd2UIFormConverter.ConvertTexturesType(new string[] { imgFileName }, isImage || forceSpriteType, isHighBitDepth);
+                Psd2UIFormConverter.ConvertTexturesType(new string[] { imgFileName }, isImage || forceSpriteType, isHighBitDepth); // Fatcat定制: 缩放导出时按8bit导入
                 if (auto9Slice)
                 {
                     Psd2UIFormConverter.ApplySpriteNineSlice(imgFileName);

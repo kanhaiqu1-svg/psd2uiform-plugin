@@ -1768,11 +1768,12 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 var tFont = FindFontAsset(textInfo.FontName);
                 if (tFont != null) text.font = tFont;
-                text.text = textInfo.Text;
-                text.supportRichText = false;
+                bool useRichText = RequiresUGUITextRichText(in textInfo);
+                text.text = useRichText ? BuildUGUITextRichText(in textInfo) : textInfo.Text;
+                text.supportRichText = useRichText;
                 text.fontSize = Mathf.Max(1, Mathf.RoundToInt(textInfo.FontSize));
-                text.fontStyle = textInfo.FontStyle;
-                text.color = textInfo.Color;
+                text.fontStyle = useRichText ? FontStyle.Normal : textInfo.FontStyle;
+                text.color = useRichText ? Color.white : textInfo.Color;
                 text.resizeTextForBestFit = false;
                 text.lineSpacing = ConvertPsdLeadingToUGUILineSpacing(text, in textInfo);
                 text.alignment = ConvertPsdAlignment(text.alignment, textInfo.Justification);
@@ -2008,6 +2009,145 @@ namespace UGF.EditorTools.Psd2UGUI
                 && left.NoBreak == right.NoBreak;
         }
 
+        internal static bool RequiresUGUITextRichText(in TextLayerInfo textInfo)
+        {
+            string sourceText = textInfo.Text ?? string.Empty;
+            var runs = textInfo.StyleRuns;
+            if (runs == null || sourceText.Length == 0 || ContainsUGUIRichTextTag(sourceText))
+                return false;
+
+            int baseStyleIndex = -1;
+            for (int i = 0; i < runs.Length; i++)
+            {
+                var run = runs[i];
+                if (!ContainsVisibleCharacters(sourceText, run.Start, run.Length))
+                    continue;
+
+                if (baseStyleIndex < 0)
+                {
+                    baseStyleIndex = i;
+                    continue;
+                }
+
+                if (!AreUGUITextStylesEqual(in runs[baseStyleIndex], in run))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool ContainsUGUIRichTextTag(string text)
+        {
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (text[i] != '<')
+                    continue;
+
+                int nameStart = i + 1;
+                if (nameStart < text.Length && text[nameStart] == '/')
+                    nameStart++;
+                int nameLength = 0;
+                while (nameStart + nameLength < text.Length)
+                {
+                    char character = text[nameStart + nameLength];
+                    if ((character < 'a' || character > 'z') && (character < 'A' || character > 'Z'))
+                        break;
+                    nameLength++;
+                }
+
+                if (nameLength == 0 || nameStart + nameLength >= text.Length)
+                    continue;
+
+                char delimiter = text[nameStart + nameLength];
+                if (delimiter != '>' && delimiter != '=' && delimiter != ' ')
+                    continue;
+
+                if ((nameLength == 1 && (IsAsciiEqual(text[nameStart], 'b') || IsAsciiEqual(text[nameStart], 'i')))
+                    || MatchesAscii(text, nameStart, nameLength, "size")
+                    || MatchesAscii(text, nameStart, nameLength, "color")
+                    || MatchesAscii(text, nameStart, nameLength, "material")
+                    || MatchesAscii(text, nameStart, nameLength, "quad"))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool MatchesAscii(string text, int start, int length, string expected)
+        {
+            if (length != expected.Length)
+                return false;
+            for (int i = 0; i < length; i++)
+            {
+                if (!IsAsciiEqual(text[start + i], expected[i]))
+                    return false;
+            }
+            return true;
+        }
+
+        private static bool IsAsciiEqual(char value, char expected)
+        {
+            return value == expected || value == expected - ('a' - 'A');
+        }
+
+        private static bool AreUGUITextStylesEqual(
+            in TextStyleRunInfo left,
+            in TextStyleRunInfo right)
+        {
+            return Mathf.Abs(left.FontSize - right.FontSize) <= 0.001f
+                && left.Color == right.Color
+                && left.FontStyle == right.FontStyle;
+        }
+
+        internal static string BuildUGUITextRichText(in TextLayerInfo textInfo)
+        {
+            string sourceText = textInfo.Text ?? string.Empty;
+            var runs = textInfo.StyleRuns;
+            if (sourceText.Length == 0 || runs == null || runs.Length == 0)
+                return sourceText;
+
+            var builder = new StringBuilder(sourceText.Length + runs.Length * 48);
+            int offset = 0;
+            for (int i = 0; i < runs.Length && offset < sourceText.Length; i++)
+            {
+                var run = runs[i];
+                int start = Mathf.Clamp(run.Start, offset, sourceText.Length);
+                int end = Mathf.Clamp(run.Start + run.Length, start, sourceText.Length);
+                if (start > offset)
+                    builder.Append(sourceText, offset, start - offset);
+                if (end > start)
+                {
+                    AppendUGUITextStyleOpening(builder, in run);
+                    builder.Append(sourceText, start, end - start);
+                    AppendUGUITextStyleClosing(builder, in run);
+                    offset = end;
+                }
+            }
+
+            if (offset < sourceText.Length)
+                builder.Append(sourceText, offset, sourceText.Length - offset);
+            return builder.ToString();
+        }
+
+        private static void AppendUGUITextStyleOpening(StringBuilder builder, in TextStyleRunInfo run)
+        {
+            builder.Append("<color=#").Append(ColorUtility.ToHtmlStringRGBA(run.Color)).Append('>');
+            builder.Append("<size=").Append(Mathf.Max(1, Mathf.RoundToInt(run.FontSize))).Append('>');
+            if (run.FontStyle == FontStyle.Bold || run.FontStyle == FontStyle.BoldAndItalic)
+                builder.Append("<b>");
+            if (run.FontStyle == FontStyle.Italic || run.FontStyle == FontStyle.BoldAndItalic)
+                builder.Append("<i>");
+        }
+
+        private static void AppendUGUITextStyleClosing(StringBuilder builder, in TextStyleRunInfo run)
+        {
+            if (run.FontStyle == FontStyle.Italic || run.FontStyle == FontStyle.BoldAndItalic)
+                builder.Append("</i>");
+            if (run.FontStyle == FontStyle.Bold || run.FontStyle == FontStyle.BoldAndItalic)
+                builder.Append("</b>");
+            builder.Append("</size></color>");
+        }
+
         private static bool AreTMPRichTextParagraphsEqual(
             in TextParagraphRunInfo left,
             in TextParagraphRunInfo right)
@@ -2026,19 +2166,13 @@ namespace UGF.EditorTools.Psd2UGUI
             if (runs == null || runs.Length == 0)
                 return textInfo.AutoKerning;
 
-            int enabledLength = 0;
-            int disabledLength = 0;
-            for (int i = 0; i < runs.Length; i++)
+            bool value = runs[0].AutoKerning;
+            for (int i = 1; i < runs.Length; i++)
             {
-                if (runs[i].AutoKerning)
-                    enabledLength += runs[i].Length;
-                else
-                    disabledLength += runs[i].Length;
+                if (runs[i].AutoKerning != value)
+                    return false;
             }
-
-            return enabledLength == disabledLength
-                ? runs[0].AutoKerning
-                : enabledLength > disabledLength;
+            return value;
         }
 
         internal static string BuildTMPRichText(
