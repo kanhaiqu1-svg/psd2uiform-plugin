@@ -15,6 +15,7 @@ MonoBehaviour:
   defaultTextType: 3
   defaultImageType: 1
   forceUseTMP: 0
+  tmpGradientConversionMode: 0
   uiFormTemplate: {fileID: 3548335019738977768, guid: 6d8c85c377edc7240ace111136f916b1, type: 3}
   rules:
   - UIType: 0
