@@ -127,7 +127,24 @@ namespace UGF.EditorTools.Psd2UGUI
                 EditorGUILayout.BeginHorizontal();
                 {
                     EditorGUILayout.LabelField("UI图片导出路径:", GUILayout.Width(150));
-                    Psd2UIFormSettings.Instance.UIImagesOutputDir = EditorGUILayout.TextField(Psd2UIFormSettings.Instance.UIImagesOutputDir);
+                    // Fatcat定制: 手动修改后退出自动跟随模式; 清空则恢复自动跟随(立即回填当前PSD目录)
+                    var newOutputDir = EditorGUILayout.TextField(Psd2UIFormSettings.Instance.UIImagesOutputDir);
+                    if (newOutputDir != Psd2UIFormSettings.Instance.UIImagesOutputDir)
+                    {
+                        if (string.IsNullOrWhiteSpace(newOutputDir))
+                        {
+                            Psd2UIFormSettings.Instance.UIImagesOutputDirAutoManaged = true;
+                            Psd2UIFormSettings.Instance.UIImagesOutputDir = string.IsNullOrWhiteSpace(targetLogic.PsdAssetName)
+                                ? string.Empty
+                                : Path.GetDirectoryName(NormalizeAssetPath(targetLogic.PsdAssetName));
+                        }
+                        else
+                        {
+                            Psd2UIFormSettings.Instance.UIImagesOutputDirAutoManaged = false;
+                            Psd2UIFormSettings.Instance.UIImagesOutputDir = newOutputDir;
+                        }
+                        Psd2UIFormSettings.Save();
+                    }
                     if (GUILayout.Button("选择路径", GUILayout.Width(80)))
                     {
                         var retPath = EditorUtility.OpenFolderPanel("选择导出路径", Psd2UIFormSettings.Instance.UIImagesOutputDir, null);
@@ -138,6 +155,7 @@ namespace UGF.EditorTools.Psd2UGUI
                                 retPath = PathExtensions.GetRelativePath(Directory.GetParent(Application.dataPath).FullName, retPath);
                             }
                             Psd2UIFormSettings.Instance.UIImagesOutputDir = retPath;
+                            Psd2UIFormSettings.Instance.UIImagesOutputDirAutoManaged = false; // Fatcat定制: 手动选择后停止自动跟随
                             Psd2UIFormSettings.Save();
                         }
                         requestExitGUI = true;
@@ -1153,7 +1171,9 @@ namespace UGF.EditorTools.Psd2UGUI
             this.previewSprite = this.psdAsset != null || !IsPsbSourceDocument(psdAssetPath)
                 ? null
                 : LoadDocumentPreviewSpriteAsset(psdAssetPath);
-            if (string.IsNullOrWhiteSpace(Psd2UIFormSettings.Instance.UIImagesOutputDir))
+            // Fatcat定制: 自动跟随模式——每次解析PSD都刷新为当前PSD目录;
+            // 用户在Inspector手动修改(或选择路径)后停止自动刷新, 清空输入框可恢复自动跟随
+            if (Psd2UIFormSettings.Instance.UIImagesOutputDirAutoManaged)
             {
                 Psd2UIFormSettings.Instance.UIImagesOutputDir = Path.GetDirectoryName(psdAssetPath);
             }

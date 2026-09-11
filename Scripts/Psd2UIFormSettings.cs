@@ -42,6 +42,11 @@ namespace UGF.EditorTools.Psd2UGUI
         /// </summary>
         public string UIImagesOutputDir;
         /// <summary>
+        /// UIImagesOutputDir 是否自动跟随当前PSD目录。
+        /// (Fatcat定制: 每次解析PSD自动刷新为当前PSD目录; 用户在Inspector手动修改后置false, 清空输入框恢复true)
+        /// </summary>
+        public bool UIImagesOutputDirAutoManaged = true;
+        /// <summary>
         /// UI预制体静默导出目录
         /// </summary>
         public string UIFormOutputDir = "Assets";
