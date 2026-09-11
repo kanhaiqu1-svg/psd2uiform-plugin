@@ -237,8 +237,8 @@ var REUSE_DIALOG_TITLES = {
     "refp": "选择复用预制体"
 };
 var REUSE_DEFAULT_SETTINGS = {
-    imageRoot: "D:/Workspace/UnityProjects/Psd2UIForm/Assets/Examples/Common",
-    prefabRoot: "D:/Workspace/UnityProjects/Psd2UIForm/Assets/Examples/CommonPrefab"
+    imageRoot: "D:/document/Unity_Slots/FC/ProjectFatcat/Assets/Examples/Common",
+    prefabRoot: "D:/document/Unity_Slots/FC/ProjectFatcat/Assets/Examples/CommonPrefab"
 };
 
 (function() {
