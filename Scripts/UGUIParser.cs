@@ -1462,7 +1462,9 @@ namespace UGF.EditorTools.Psd2UGUI
             if (layerNode != null)
             {
                 var spAssetName = layerNode.ExportImageAsset(true);
-                var sprite = PsdLayerNode.LoadSpriteAssetAtPath(spAssetName);
+                // Fatcat定制: 加载失败时修正导入类型/路径并重试(部分机器导出时图片尚未导入完成,
+                // 或类型被工程脚本改回Default, 导致prefab绑定空Sprite显示白图且无任何报错)
+                var sprite = LoadSpriteAssetWithRetry(spAssetName);
                 if (sprite != null)
                 {
                     if (auto9Slice)
@@ -1472,11 +1474,44 @@ namespace UGF.EditorTools.Psd2UGUI
                         {
                             RightClickExtension.TryCropMinimalNineSlice(spAssetName);
                         }
-                        sprite = PsdLayerNode.LoadSpriteAssetAtPath(spAssetName) ?? sprite;
+                        sprite = PsdLayerNode.LoadSpriteAssetAtPath(Psd2UIFormConverter.NormalizeToAssetPath(spAssetName)) ?? sprite;
                     }
                     return sprite;
                 }
             }
+            return null;
+        }
+
+        // Fatcat定制: 加载导出PNG的Sprite子资产, 失败时强制修正导入类型并重试。
+        // 修复"个别机器导出prefab白图(Image组件None Sprite)"问题: 导出PNG写盘后Unity的导入
+        // 可能尚未完成或类型被AutoSetTextureUISprite改回Default, LoadSpriteAssetAtPath会
+        // 静默返回null; 另对工程外软链接路径做标准化(LoadAssetAtPath只认Assets内路径)。
+        private static Sprite LoadSpriteAssetWithRetry(string assetPath)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath)) return null;
+
+            var normalizedPath = Psd2UIFormConverter.NormalizeToAssetPath(assetPath);
+            var sprite = PsdLayerNode.LoadSpriteAssetAtPath(normalizedPath);
+            if (sprite != null) return sprite;
+
+            var importer = AssetImporter.GetAtPath(normalizedPath) as TextureImporter;
+            if (importer != null)
+            {
+                if (importer.textureType != TextureImporterType.Sprite || importer.spriteImportMode != SpriteImportMode.Single)
+                {
+                    Debug.LogWarning($"[Psd2UIForm] 导出图片未按Sprite导入, 强制修正后重试: {normalizedPath}");
+                    importer.textureType = TextureImporterType.Sprite;
+                    importer.spriteImportMode = SpriteImportMode.Single;
+                    importer.SaveAndReimport();
+                }
+                AssetDatabase.Refresh();
+                sprite = PsdLayerNode.LoadSpriteAssetAtPath(normalizedPath);
+                if (sprite != null) return sprite;
+            }
+
+            Debug.LogError($"[Psd2UIForm] 加载导出图片失败(prefab将显示白图): {assetPath}\n" +
+                $"标准化路径: {normalizedPath}\n" +
+                $"Importer: {(importer == null ? "null" : importer.textureType.ToString())}");
             return null;
         }
         #region 9-Slice Border Detection
