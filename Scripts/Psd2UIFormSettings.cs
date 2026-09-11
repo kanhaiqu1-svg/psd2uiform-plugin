@@ -51,6 +51,11 @@ namespace UGF.EditorTools.Psd2UGUI
         /// </summary>
         public string UIFormOutputDir = "Assets";
         /// <summary>
+        /// UIFormOutputDir 是否自动跟随当前机台的 Prefab/ 目录。
+        /// (Fatcat定制: 每次解析PSD自动刷新为 {slotRoot}/Prefab/; 用户在Inspector手动修改后置false, 清空输入框恢复true)
+        /// </summary>
+        public bool UIFormOutputDirAutoManaged = true;
+        /// <summary>
         /// 使用静默导出路径(点击导出UIForm后不弹出路径选择)
         /// </summary>
         public bool UseUIFormOutputDir = true;

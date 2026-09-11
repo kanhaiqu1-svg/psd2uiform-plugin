@@ -136,7 +136,7 @@ namespace UGF.EditorTools.Psd2UGUI
                             Psd2UIFormSettings.Instance.UIImagesOutputDirAutoManaged = true;
                             Psd2UIFormSettings.Instance.UIImagesOutputDir = string.IsNullOrWhiteSpace(targetLogic.PsdAssetName)
                                 ? string.Empty
-                                : Path.GetDirectoryName(NormalizeAssetPath(targetLogic.PsdAssetName));
+                                : Path.GetDirectoryName(targetLogic.PsdAssetName)?.Replace("\\", "/");
                         }
                         else
                         {
@@ -168,7 +168,24 @@ namespace UGF.EditorTools.Psd2UGUI
                     Psd2UIFormSettings.Instance.UseUIFormOutputDir = EditorGUILayout.ToggleLeft("使用UIForm导出路径:", Psd2UIFormSettings.Instance.UseUIFormOutputDir, GUILayout.Width(150));
                     EditorGUI.BeginDisabledGroup(!Psd2UIFormSettings.Instance.UseUIFormOutputDir);
                     {
-                        Psd2UIFormSettings.Instance.UIFormOutputDir = EditorGUILayout.TextField(Psd2UIFormSettings.Instance.UIFormOutputDir);
+                        // Fatcat定制: 手动修改后退出自动跟随模式; 清空则恢复自动跟随(立即回填当前机台Prefab目录)
+                        var newFormOutputDir = EditorGUILayout.TextField(Psd2UIFormSettings.Instance.UIFormOutputDir);
+                        if (newFormOutputDir != Psd2UIFormSettings.Instance.UIFormOutputDir)
+                        {
+                            if (string.IsNullOrWhiteSpace(newFormOutputDir))
+                            {
+                                Psd2UIFormSettings.Instance.UIFormOutputDirAutoManaged = true;
+                                Psd2UIFormSettings.Instance.UIFormOutputDir = string.IsNullOrWhiteSpace(targetLogic.SlotRootPath)
+                                    ? string.Empty
+                                    : targetLogic.SlotRootPath + "/Prefab/";
+                            }
+                            else
+                            {
+                                Psd2UIFormSettings.Instance.UIFormOutputDirAutoManaged = false;
+                                Psd2UIFormSettings.Instance.UIFormOutputDir = newFormOutputDir;
+                            }
+                            Psd2UIFormSettings.Save();
+                        }
                         if (GUILayout.Button("选择路径", GUILayout.Width(80)))
                         {
                             var retPath = EditorUtility.OpenFolderPanel("选择导出路径", Psd2UIFormSettings.Instance.UIFormOutputDir, null);
@@ -179,6 +196,7 @@ namespace UGF.EditorTools.Psd2UGUI
                                     retPath = PathExtensions.GetRelativePath(Directory.GetParent(Application.dataPath).FullName, retPath);
                                 }
                                 Psd2UIFormSettings.Instance.UIFormOutputDir = retPath;
+                                Psd2UIFormSettings.Instance.UIFormOutputDirAutoManaged = false; // Fatcat定制: 手动选择后停止自动跟随
                                 Psd2UIFormSettings.Save();
                             }
                             requestExitGUI = true;
@@ -493,6 +511,7 @@ namespace UGF.EditorTools.Psd2UGUI
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [HideInInspector][SerializeField] private string psdAssetPath;
         [HideInInspector][SerializeField] private string slotRootPath; // Fatcat定制: Slot根目录(供Prefab导出默认路径)
+        internal string SlotRootPath => slotRootPath; // Fatcat定制: 供Inspector回填默认Prefab导出路径
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [Header("Debug:")][SerializeField] bool drawLayerRectGizmos = true;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
@@ -1176,6 +1195,11 @@ namespace UGF.EditorTools.Psd2UGUI
             if (Psd2UIFormSettings.Instance.UIImagesOutputDirAutoManaged)
             {
                 Psd2UIFormSettings.Instance.UIImagesOutputDir = Path.GetDirectoryName(psdAssetPath);
+            }
+            // Fatcat定制: prefab导出路径自动跟随当前机台的 Prefab/ 目录(手动改过则停止)
+            if (Psd2UIFormSettings.Instance.UIFormOutputDirAutoManaged && !string.IsNullOrWhiteSpace(slotRootPath))
+            {
+                Psd2UIFormSettings.Instance.UIFormOutputDir = slotRootPath + "/Prefab/";
             }
             if (string.IsNullOrWhiteSpace(this.uiFormName))
             {
@@ -2396,6 +2420,22 @@ namespace UGF.EditorTools.Psd2UGUI
                 Selection.activeGameObject = uiPrefab;
             }
         }
+        // Fatcat定制: 按prefab文件名判断是否生成到同名子目录(仅award/board两类, 团队约定)
+        private static bool ShouldUsePrefabSubfolder(string prefabFileName)
+        {
+            if (string.IsNullOrWhiteSpace(prefabFileName)) return false;
+            // 优先按 slot_XXXX_关键字 的第一段精确匹配(避免 scoreboard 等误判)
+            var match = System.Text.RegularExpressions.Regex.Match(prefabFileName, @"[Ss]lot[_-]?\d+[_-]([A-Za-z0-9]+)");
+            if (match.Success)
+            {
+                var keyword = match.Groups[1].Value.ToLowerInvariant();
+                return keyword == "award" || keyword == "board";
+            }
+            // 无 slot_ 命名时退化为包含匹配
+            var lower = prefabFileName.ToLowerInvariant();
+            return lower.Contains("award") || lower.Contains("board");
+        }
+
         private bool ExportUIPrefab(Transform root, string outputDir)
         {
             // Fatcat定制: Slot 根目录下的 Prefab/ 作为默认输出目录(允许设置或选择器覆盖)
@@ -2430,10 +2470,50 @@ namespace UGF.EditorTools.Psd2UGUI
             var prefabFileName = baseName.StartsWith("prefab_", StringComparison.OrdinalIgnoreCase)
                 ? baseName
                 : "prefab_" + baseName;
-            var prefabName = Path.Combine(outputDir, $"{prefabFileName}.prefab").Replace("\\", "/");
+            // Fatcat定制: award/board 类PSD生成到 Prefab/ 下的同名子目录(团队约定: prefab与动画文件同目录),
+            // 其余关键字平铺到所选目录; 所选目录最后一段已是prefab名时不再追加(防双重嵌套)
+            var prefabDir = outputDir;
+            if (ShouldUsePrefabSubfolder(prefabFileName) && !string.IsNullOrWhiteSpace(prefabDir))
+            {
+                var lastSeg = Path.GetFileName(prefabDir.TrimEnd('/', '\\'));
+                if (!lastSeg.Equals(prefabFileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    prefabDir = Path.Combine(prefabDir, prefabFileName).Replace("\\", "/");
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(prefabDir) && !Directory.Exists(prefabDir))
+            {
+                try
+                {
+                    Directory.CreateDirectory(prefabDir);
+                    AssetDatabase.Refresh();
+                }
+                catch (Exception err)
+                {
+                    Debug.LogError($"导出UI prefab失败:{err.Message}");
+                    return false;
+                }
+            }
+            var prefabName = Path.Combine(prefabDir, $"{prefabFileName}.prefab").Replace("\\", "/");
             // Fatcat定制: 标准化目录路径(兼容软链接映射), 再拼接文件名
-            var prefabDir = Path.GetDirectoryName(prefabName).Replace("\\", "/");
             prefabName = NormalizeToAssetPath(prefabDir) + "/" + Path.GetFileName(prefabName);
+            // Fatcat定制: 兼容历史平铺导出——子目录路径找不到时检查平铺位置, 找到则自动迁移(保留GUID)
+            if (root == this.transform && !File.Exists(prefabName) && !string.IsNullOrWhiteSpace(outputDir))
+            {
+                var flatName = NormalizeToAssetPath(outputDir) + "/" + prefabFileName + ".prefab";
+                if (!flatName.Equals(prefabName, StringComparison.OrdinalIgnoreCase) && File.Exists(flatName))
+                {
+                    try
+                    {
+                        AssetDatabase.MoveAsset(flatName, prefabName);
+                        Debug.LogWarning($"[Psd2UIForm] 平铺prefab已自动迁移到子目录: {flatName} → {prefabName}");
+                    }
+                    catch (Exception err)
+                    {
+                        Debug.LogWarning($"[Psd2UIForm] 平铺prefab迁移失败, 将按全新生成处理: {err.Message}");
+                    }
+                }
+            }
             if (root == this.transform && File.Exists(prefabName))
             {
                 int option = EditorUtility.DisplayDialogComplex(
