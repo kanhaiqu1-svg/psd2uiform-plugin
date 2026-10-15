@@ -13,7 +13,7 @@
 - 节点表无表头，列顺序见 nodeColumns。id 是唯一素材 ID；parent、name 和 layerName 仅是 PSD 组织线索，layerName 为空时等同 name。
 - kind=text/image/group 表示源图层类别，不是 UI 类型；image 也可能含文字。text 是原生文字，textStyle 提供首个文字样式。
 - draw(first,last) 是绘制顺序范围，小值在下、大值在上；单层两值相同，分组包含子层范围。
-- `ref 路径` 表示资源复用，`refp 路径` 表示 prefab 复用；通过 sources 引用对应 ID，不将前缀或路径写入节点 name。
+- `ref 路径` 表示资源复用，`refp 路径` 表示 prefab 复用；通过 sources 引用对应 ID，不将前缀或路径写入节点 name。复用资源必须独占一个元素（Fatcat定制补充）：该元素的 sources 只能含这一个素材，既不得与同组其他素材合并，也不得把 ref 图层与它复用的原图层放进同一 sources；每个 ref/refp 出现处各输出一个独立元素。refp 元素的 type 必须是主类型；ref 元素的 type 不能是容器（Button/Toggle/ToggleGroup/Slider/InputField/Dropdown/ScrollView/Panel），也不能是文本。
 - rect 为原画布左上角坐标，x 向右、y 向下，w/h 为宽高。atlas 为页索引:格子。active=0 表示隐藏，不代表某种控件状态。
 - `\t`、`\n`、`\r`、`\\` 是 TSV 转义字符；helperContracts 列出可用类型及角色。
 
@@ -93,7 +93,7 @@ ui 是目标树的平铺表示，每项包含：
 - id：你分配的唯一目标 ID，例如 u1、u2，与素材 ID 独立。
 - parent：主 UI 的直接容器 ID，或角色所属的主 UI ID；根节点省略。
 - type：当前实例的主类型或当前所属实例的规范角色名，不输出 TMP 类型；与外层主类型无关。
-- sources：当前渲染元素独占的素材 ID 数组。文本不填 sources；完整原生文字用 text.source，拆分标签用 value 和独立 rect；styleSource 可共享，不占素材归属。具有自有角色的主 UI 不填 sources；refp 复用实例直接引用资源 ID，内部不展开。group 按全部渲染叶素材计算归属，不能吞并其他实例或角色。
+- sources：当前渲染元素独占的素材 ID 数组。文本不填 sources；完整原生文字用 text.source，拆分标签用 value 和独立 rect；styleSource 可共享，不占素材归属。具有自有角色的主 UI 不填 sources；refp 复用实例直接引用资源 ID，内部不展开。group 按全部渲染叶素材计算归属，不能吞并其他实例或角色。但若归属素材中含 ref/refp，则复用独占规则优先：该元素只能有这一个素材，不按 group 合并。
 - name：简短英文 PascalCase 名称，只含英文字母、数字和下划线，以英文字母开头，如 ConfirmButton、UserName、Score。中文图层名须翻译为英文，不用中文、拼音或当前显示数值。无 sources 的重建文本必须有稳定 name；角色可省略 name。text.value 保留实际显示文字。
 - rect：可选 `{x,y,w,h}`，使用节点表相同的原画布坐标。已有素材或完整原生文字通过 sources/text.source 引用，不必重复 rect；普通容器可省略 rect，按子元素范围确定。需要独立裁剪范围、局部文字或无 sources 的重建文字时提供 rect，不能借用 styleSource 坐标。矩形 ScrollView_Viewport 可只提供 rect；省略时使用 ScrollView 矩形。
 - text：上述 source/value 两种模式之一，仅用于文本类型或角色。
