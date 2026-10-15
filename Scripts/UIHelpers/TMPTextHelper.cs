@@ -45,6 +45,12 @@ namespace UGF.EditorTools.Psd2UGUI
             }
             else
             {
+                if (LayerNode.IsAiAuthoritative) throw new System.InvalidOperationException("AI 声明与 Helper 输入不匹配；保留类型和素材绑定。");
+                if (ParsingFromOnEnable)
+                {
+                    DeferTypeFallback(UGUIParser.Instance.DefaultImage);
+                    return;
+                }
                 LayerNode.SetUIType(UGUIParser.Instance.DefaultImage);
             }
         }

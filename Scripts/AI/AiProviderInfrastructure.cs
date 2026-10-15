@@ -51,17 +51,6 @@ namespace UGF.EditorTools.Psd2UGUI
         public CancellationToken CancellationToken;
     }
 
-    [Serializable]
-    [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
-    internal sealed class AiAnalysisResult
-    {
-        public bool Success;
-        public string ProviderId;
-        public string RawOutput;
-        public string PatchJsonPath;
-        public string ErrorMessage;
-    }
-
     internal interface IAiProvider
     {
         string ProviderId { get; }

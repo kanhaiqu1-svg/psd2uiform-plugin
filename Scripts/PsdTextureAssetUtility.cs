@@ -16,7 +16,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using cn.efunstudio.psdreader;
 using cn.efunstudio.psdreader.PsdParser;
 using UnityEditor;
 using UnityEngine;
@@ -28,6 +27,11 @@ namespace UGF.EditorTools.Psd2UGUI
     internal static class PsdTextureAssetUtility
     {
         private const string ExportModeKey = "Psd2UIExportMode";
+#if UNITY_2020_2_OR_NEWER
+        private const TextureImporterFormat HighBitDepthImportFormat = TextureImporterFormat.RGBA64;
+#else
+        private const TextureImporterFormat HighBitDepthImportFormat = TextureImporterFormat.RGBAFloat;
+#endif
         private static readonly PlatformSpec[] ManagedPlatforms = CollectManagedPlatforms();
 
         internal static byte[] EncodePng(PsdRenderedImage rendered)
@@ -63,7 +67,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 return null;
             }
 
-            if (texture.format != TextureFormat.RGBA64)
+            if (texture.graphicsFormat != GraphicsFormat.R16G16B16A16_UNorm)
             {
                 return texture.EncodeToPNG();
             }
@@ -120,14 +124,14 @@ namespace UGF.EditorTools.Psd2UGUI
                 return;
             }
 
-            ApplyPlatformOverride(importer, platform.Name, TextureImporterFormat.RGBA64, true);
+            ApplyPlatformOverride(importer, platform.Name, HighBitDepthImportFormat, true);
         }
 
         private static bool SupportsHighBitDepthFormat(TextureImporterType textureType, PlatformSpec platform)
         {
             if (platform.IsDefaultPlatform)
             {
-                return TextureImporter.IsDefaultPlatformTextureFormatValid(textureType, TextureImporterFormat.RGBA64);
+                return TextureImporter.IsDefaultPlatformTextureFormatValid(textureType, HighBitDepthImportFormat);
             }
 
             if (!BuildPipeline.IsBuildTargetSupported(platform.Group, platform.Target))
@@ -135,7 +139,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 return false;
             }
 
-            return TextureImporter.IsPlatformTextureFormatValid(textureType, platform.Target, TextureImporterFormat.RGBA64);
+            return TextureImporter.IsPlatformTextureFormatValid(textureType, platform.Target, HighBitDepthImportFormat);
         }
 
         private static void ApplyPlatformOverride(TextureImporter importer, string platformName, TextureImporterFormat format, bool overridden)
@@ -152,16 +156,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private static string BuildExportModeTag(bool preferHighBitDepth)
         {
-            return $"{ExportModeKey}:{(preferHighBitDepth ? "16" : "8")}:{ResolveAuthorizationStamp()}";
-        }
-
-        private static int ResolveAuthorizationStamp()
-        {
-#if EFUN_PRIVATE
-            return 1;
-#else
-            return PsdReaderProductAccess.IsAvailable ? 1 : 0;
-#endif
+            return $"{ExportModeKey}:{(preferHighBitDepth ? "16" : "8")}";
         }
 
         private static string MergeExportModeTag(string userData, string tag)

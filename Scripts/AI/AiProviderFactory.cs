@@ -1,60 +1,24 @@
-/*
- * Copyright (c) 2023-2026 Beijing Yiqu Technology Co., Ltd.
- *
- * All Rights Reserved.
- *
- * The software and associated documentation (including but not limited to source code,
- * object code, documents, images, audio, and video files) are the intellectual property
- * of Beijing Yiqu Technology Co., Ltd.
- *
- * For commercial use or licensing inquiries, please contact:
- * Email: efunstudio@gmail.com
- * Website: https://efunstudio.cn
- */
-
 #if UNITY_EDITOR
-using System;
-
+using UGF.EditorTools.Psd2UGUI.Cli;
 namespace UGF.EditorTools.Psd2UGUI
 {
     internal static class AiProviderFactory
     {
-        internal static IAiProvider Create(UGUIParser parser)
+        internal static CliAiProvider Create(UGUIParser parser)
         {
-            var config = parser != null ? parser.AiProviderConfig : new AiProviderConfig();
-            return Create(config.provider);
+            return Create(parser != null ? parser.AiProviderConfig.mode : AiMode.Qoder);
         }
-
-        internal static IAiProvider Create(AiProviderKind providerKind)
+        internal static CliAiProvider Create(AiMode mode) => new CliAiProvider(AiProfiles.Preset(mode));
+        internal static CliAiProvider CreateById(string id)
         {
-            switch (providerKind)
+            switch (id)
             {
-                case AiProviderKind.CodexCli:
-                    return new CodexCliProvider();
-                case AiProviderKind.ClaudeCodeCli:
-                    return new ClaudeCodeCliProvider();
-                case AiProviderKind.OpenCodeCli:
-                    return new OpenCodeCliProvider();
-                default:
-                    return new CodexCliProvider();
-            }
-        }
-
-        internal static IAiProvider CreateById(string providerId)
-        {
-            switch ((providerId ?? string.Empty).Trim())
-            {
-                case "codex-cli":
-                case "codex":
-                    return new CodexCliProvider();
-                case "claude-code-cli":
-                case "claude":
-                    return new ClaudeCodeCliProvider();
-                case "opencode-cli":
-                case "opencode":
-                    return new OpenCodeCliProvider();
-                default:
-                    return null;
+                case "Claude": return Create(AiMode.Claude);
+                case "Codex": return Create(AiMode.Codex);
+                case "OpenCode": return Create(AiMode.OpenCode);
+                case "Qoder": return Create(AiMode.Qoder);
+                case "Cursor": return Create(AiMode.Cursor);
+                default: return null;
             }
         }
     }

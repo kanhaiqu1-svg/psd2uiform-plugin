@@ -21,6 +21,7 @@ https://shop106471535.taobao.com
 #if UNITY_EDITOR
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using cn.efunstudio.psdreader.PsdParser;
 using UnityEngine;
 
@@ -106,6 +107,48 @@ namespace UGF.EditorTools.Psd2UGUI
 
             nextIndex++;
             return null;
+        }
+
+        // Photoshop keeps lyid stable while layers are renamed, moved or reordered, while a flat
+        // index only records where the layer sat when the tree was parsed. Same walk order as
+        // FindByFlatIndex so the two never disagree.
+        private static readonly ConditionalWeakTable<PsdDocument, Dictionary<int, int>> LayerIndexById =
+            new ConditionalWeakTable<PsdDocument, Dictionary<int, int>>();
+
+        internal static Dictionary<int, int> GetLayerIndexByIdMap(this PsdDocument document)
+        {
+            if (document == null || document.Childs == null) return null;
+            if (LayerIndexById.TryGetValue(document, out Dictionary<int, int> cached)) return cached;
+            var map = new Dictionary<int, int>();
+            int nextIndex = 0;
+            CollectLayerIds(document.Childs, ref nextIndex, map);
+            LayerIndexById.Add(document, map);
+            return map;
+        }
+
+        private static void CollectLayerIds(PsdLayer[] layers, ref int nextIndex, Dictionary<int, int> map)
+        {
+            if (layers == null) return;
+            foreach (var layer in layers)
+            {
+                if (layer == null) continue;
+                if (layer.IsGroup)
+                {
+                    nextIndex++;
+                    CollectLayerIds(layer.Childs, ref nextIndex, map);
+                    RegisterLayerId(layer, nextIndex, map);
+                    nextIndex++;
+                    continue;
+                }
+                RegisterLayerId(layer, nextIndex, map);
+                nextIndex++;
+            }
+        }
+
+        private static void RegisterLayerId(PsdLayer layer, int flatIndex, Dictionary<int, int> map)
+        {
+            if (!layer.TryGetLayerId(out int layerId) || layerId <= 0) return;
+            if (!map.ContainsKey(layerId)) map.Add(layerId, flatIndex);
         }
 
         internal static int CountAllLayers(this PsdDocument document)

@@ -27,7 +27,17 @@ using cn.efunstudio.psdreader;
 using cn.efunstudio.psdreader.PsdParser;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+#if !UNITY_2021_2_OR_NEWER
+using PrefabStage = UnityEditor.Experimental.SceneManagement.PrefabStage;
+using PrefabStageUtility = UnityEditor.Experimental.SceneManagement.PrefabStageUtility;
+#endif
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
+#if UNITY_6000_3_OR_NEWER
+using PsdObjectId = UnityEngine.EntityId;
+#else
+using PsdObjectId = System.Int32;
+#endif
 using UnityEngine.UI;
 
 namespace UGF.EditorTools.Psd2UGUI
@@ -42,7 +52,6 @@ namespace UGF.EditorTools.Psd2UGUI
         GUIContent exportUISpritesBt;
         GUIContent aiAutoFixBt;
         GUIContent applyAiResultBt;
-        GUIContent normalizeStructureBt;
         GUIContent generateUIFormBt;
         GUIContent openParserConfigBt;
         GUILayoutOption btHeight;
@@ -55,12 +64,11 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             btHeight = GUILayout.Height(30);
             targetLogic = target as Psd2UIFormConverter;
-            parsePsd2NodesBt = new GUIContent("解析psd图层", "把psd图层解析为可编辑节点树");
+            parsePsd2NodesBt = new GUIContent("同步最新 PSD", "更新素材，保留已确认类型、节点身份和人工调整");
             exportUISpritesBt = new GUIContent("导出Images", "导出勾选的psd图层为碎图");
-            aiAutoFixBt = new GUIContent("AI自动识别UI类型", "导出当前节点树和预览图，调用AI自动识别并修正UI类型与结构");
+            aiAutoFixBt = new GUIContent("AI自动识别UI类型", "从原始 PSD 素材快照识别 UI 类型与结构");
             applyAiResultBt = new GUIContent("应用AI结果", "应用当前 AI 识别数据 到节点树");
-            normalizeStructureBt = new GUIContent("修正树结构", "按本地 owner 规则修正层级，并刷新主控件对子控件的引用");
-            generateUIFormBt = new GUIContent("生成UIForm", "根据解析后的节点树生成UIForm Prefab");
+            generateUIFormBt = new GUIContent("生成 / 更新 UIForm", "首次生成，或在已关联 prefab 上更新；保留对象引用和人工字段修改");
             openParserConfigBt = new GUIContent("打开设置", "选中并定位PSD2UIForm全局解析和生成规则配置");
 #if !EFUN_PRIVATE
             if (Psd2UIFormSettings.Instance.CompressImage)
@@ -153,6 +161,8 @@ namespace UGF.EditorTools.Psd2UGUI
                                 {
                                     retPath = PathExtensions.GetRelativePath(Directory.GetParent(Application.dataPath).FullName, retPath);
                                 }
+                                // 面板选出来的是 OS 路径（Windows 带 \），存进设置前统一成资产路径。
+                                retPath = retPath.Replace("\\", "/");
                                 Psd2UIFormSettings.Instance.UIFormOutputDir = retPath;
                                 Psd2UIFormSettings.Save();
                             }
@@ -165,20 +175,19 @@ namespace UGF.EditorTools.Psd2UGUI
 
                 EditorGUILayout.EndVertical();
             }
-
-
             EditorGUILayout.BeginHorizontal();
             {
                 if (GUILayout.Button(parsePsd2NodesBt, btHeight))
                 {
-                    if (TryGetKeepExistingUITypeSelection(out var keepExistingUIType))
-                    {
-                        Psd2UIFormConverter.ParsePsd2LayerPrefab(targetLogic.PsdAssetName, targetLogic, keepExistingUIType);
-                    }
+                    Psd2UIFormConverter.ParsePsd2LayerPrefab(targetLogic.PsdAssetName, targetLogic);
                 }
                 if (GUILayout.Button(exportUISpritesBt, btHeight))
                 {
                     targetLogic.ExportSprites();
+                }
+                if (GUILayout.Button(new GUIContent("整理复用图片", "比较当前文档已导出的图片，迁移生成结果中的绑定，并清理没有引用的重复图片。"), btHeight))
+                {
+                    EditorUtility.DisplayDialog("图片复用", targetLogic.ConsolidateImages(), "确定");
                 }
                 EditorGUILayout.EndHorizontal();
             }
@@ -188,7 +197,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 {
                     if (!AiAutoFixWorkflow.Start(targetLogic, out var aiError))
                     {
-                        EditorUtility.DisplayDialog("AI修正启动失败", aiError, "确定");
+                        EditorUtility.DisplayDialog("AI 识别无法启动", aiError, "确定");
                     }
                 }
                 if (GUILayout.Button(applyAiResultBt, btHeight))
@@ -196,17 +205,6 @@ namespace UGF.EditorTools.Psd2UGUI
                     if (!AiAutoFixWorkflow.ApplyCurrentResult(targetLogic, out var applyError))
                     {
                         EditorUtility.DisplayDialog("应用AI结果失败", applyError, "确定");
-                    }
-                }
-                if (GUILayout.Button(normalizeStructureBt, btHeight))
-                {
-                    if (!targetLogic.NormalizeLocalStructure(true, out var summary))
-                    {
-                        EditorUtility.DisplayDialog("本地归一化失败", summary, "确定");
-                    }
-                    else
-                    {
-                        EditorUtility.DisplayDialog("本地归一化完成", summary, "确定");
                     }
                 }
             }
@@ -251,15 +249,6 @@ namespace UGF.EditorTools.Psd2UGUI
                     GUIUtility.ExitGUI();
                 }
             }
-        }
-
-        private static bool TryGetKeepExistingUITypeSelection(out bool keepExistingUIType)
-        {
-            const string title = "重新解析PSD图层";
-            const string message = "重新解析会重建当前节点树。\n\n是否保留现有UI类型？\n\n选择“是”会按当前节点层级尽量回填已有 UI Type，新图层仍按默认规则初始化。\n选择“否”会按PSD图层标记重新初始化 UI Type。";
-            int option = EditorUtility.DisplayDialogComplex(title, message, "是，保留现有UI类型", "否，重新解析UI类型", "取消");
-            keepExistingUIType = option == 0;
-            return option != 2;
         }
 
         private void DrawMetadataDebugPanel()
@@ -333,6 +322,7 @@ namespace UGF.EditorTools.Psd2UGUI
         private static GUIStyle s_versionUpdateStyle;
         private static GUIStyle s_versionUpdateButtonStyle;
         private static GUIContent s_warningIconContent;
+        private static readonly GUIContent ReleaseNotesButtonContent = new GUIContent("更新日志");
 
         internal static bool DrawVersionUpdateNotice(string message, string buttonLabel)
         {
@@ -348,8 +338,9 @@ namespace UGF.EditorTools.Psd2UGUI
             GUIContent warningIconContent = GetWarningIconContent();
             float width = Mathf.Max(120f, EditorGUIUtility.currentViewWidth - 56f);
             float buttonWidth = 68f;
+            float buttonSpacing = 6f;
             float innerWidth = Mathf.Max(80f, width - style.padding.horizontal);
-            float labelWidth = Mathf.Max(60f, innerWidth - buttonWidth - WarningIconSize - WarningIconSpacing - 8f);
+            float labelWidth = Mathf.Max(60f, innerWidth - buttonWidth * 2f - buttonSpacing - WarningIconSize - WarningIconSpacing - 8f);
             float labelHeight = style.CalcHeight(content, labelWidth);
             float buttonHeight = Mathf.Max(EditorGUIUtility.singleLineHeight + 2f, buttonStyle.CalcHeight(buttonContent, buttonWidth));
             float height = Mathf.Max(Mathf.Max(labelHeight, buttonHeight), WarningIconSize) + style.padding.vertical;
@@ -370,6 +361,12 @@ namespace UGF.EditorTools.Psd2UGUI
                 buttonWidth,
                 buttonHeight);
 
+            Rect releaseNotesButtonRect = new Rect(
+                buttonRect.x - buttonSpacing - buttonWidth,
+                buttonRect.y,
+                buttonWidth,
+                buttonHeight);
+
             Rect iconRect = new Rect(
                 contentRect.x,
                 contentRect.y + Mathf.Max(0f, (contentRect.height - WarningIconSize) * 0.5f),
@@ -379,11 +376,15 @@ namespace UGF.EditorTools.Psd2UGUI
             Rect labelRect = new Rect(
                 iconRect.xMax + WarningIconSpacing,
                 contentRect.y,
-                Mathf.Max(1f, buttonRect.x - iconRect.xMax - WarningIconSpacing - 8f),
+                Mathf.Max(1f, releaseNotesButtonRect.x - iconRect.xMax - WarningIconSpacing - 8f),
                 contentRect.height);
 
             GUI.Label(iconRect, warningIconContent);
             GUI.Label(labelRect, content, style);
+            if (GUI.Button(releaseNotesButtonRect, ReleaseNotesButtonContent, buttonStyle))
+            {
+                Application.OpenURL(PsdReaderProductAccess.ReleaseNotesUrl);
+            }
             return GUI.Button(buttonRect, buttonContent, buttonStyle);
         }
 
@@ -447,11 +448,10 @@ namespace UGF.EditorTools.Psd2UGUI
     [ExecuteInEditMode]
     [RequireComponent(typeof(SpriteRenderer))]
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = false)]
-    public sealed class Psd2UIFormConverter : MonoBehaviour
+    public sealed partial class Psd2UIFormConverter : MonoBehaviour
     {
         const string RecordLayerOperation = "Change Export Image";
-        const string GeneratedContainerTypeKey = "__Container";
-        const string GeneratedPrefabReferenceTypeKey = "__PrefabRef";
+        const string GeneratedOrphansRootName = "__PSD2UIForm_Orphans";
         const string PreviewSpriteTagKey = "Psd2UIFormPreview";
         const string PreviewSpriteTagVersion = "v2";
         const float GroupOpacityOpaqueThreshold = 0.99999f;
@@ -474,11 +474,37 @@ namespace UGF.EditorTools.Psd2UGUI
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [Tooltip("Scene点选时，优先选中命中区域内面积最小的图层节点")][SerializeField] bool preferSmallestLayerOnScenePick = true;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
-        [HideInInspector][SerializeField] private List<GeneratedMetadataSerializedEntry> generatedMetadataEntries = new List<GeneratedMetadataSerializedEntry>();
+        private List<GeneratedMetadataSerializedEntry> generatedMetadataEntries { get => Document.outputs; set => Document.outputs = value; }
         private PsdDocument psdInstance;//psd文件解析实例
         private GUIStyle uiTypeLabelStyle;
         private readonly Dictionary<string, PsdLayerNode> layerLookupByName = new Dictionary<string, PsdLayerNode>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> sharedSpriteAssets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 本轮真正写出/复用的图片路径，只用于生成后提示“目录里还留着哪些历史文件”，插件不据此删除任何东西。
+        private readonly HashSet<string> exportedImagePathsThisRound = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        internal void RegisterExportedImagePath(string assetPath)
+        {
+            if (!string.IsNullOrEmpty(assetPath)) exportedImagePathsThisRound.Add(assetPath.Replace("\\", "/"));
+        }
+        internal List<string> CollectStaleGeneratedImages(string dir)
+        {
+            var stale = new List<string>();
+            if (string.IsNullOrEmpty(dir) || exportedImagePathsThisRound.Count == 0 || !Directory.Exists(dir)) return stale;
+            foreach (string file in Directory.GetFiles(dir, "*.png", SearchOption.AllDirectories))
+            {
+                string asset = file.Replace("\\", "/");
+                int cut = asset.IndexOf("Assets/", StringComparison.Ordinal);
+                if (cut > 0) asset = asset.Substring(cut);
+                if (!exportedImagePathsThisRound.Contains(asset)) stale.Add(Path.GetFileName(asset));
+            }
+            return stale;
+        }
+        private void ReportStaleGeneratedImages()
+        {
+            var stale = CollectStaleGeneratedImages(GetUIFormImagesOutputDir());
+            if (stale.Count == 0) return;
+            Debug.LogWarning($"出图目录里有 {stale.Count} 张本轮没有写出的图片（多为历次生成留下的历史文件，插件不会自动删除）: "
+                + string.Join(", ", stale.Take(20)) + (stale.Count > 20 ? " …" : ""));
+        }
         private readonly Dictionary<string, GameObject> sharedPrefabAssets = new Dictionary<string, GameObject>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> referencedLayerKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> sharedPrefabExportInProgress = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -491,9 +517,12 @@ namespace UGF.EditorTools.Psd2UGUI
 
         [Serializable]
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
-        private sealed class GeneratedMetadataEntry
+        internal sealed class GeneratedMetadataEntry
         {
+            public string ParentIdentity;
             public string GlobalObjectId;
+            public string NodeId;
+            public string SourceIdentity;
             public string Key;
             public string TypeKey;
             public bool IsContainer;
@@ -501,24 +530,26 @@ namespace UGF.EditorTools.Psd2UGUI
 
         [Serializable]
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
-        private sealed class GeneratedMetadataSerializedEntry
+        internal sealed class GeneratedMetadataSerializedEntry
         {
+            public List<PsdPropertyRecord> Properties = new List<PsdPropertyRecord>();
             public string PrefabAssetPath;
-            [HideInInspector] public string Json;
+            public string PrefabAssetGuid;
+            public string PsdAssetGuid;
+            public string RootTypeKey;
             public List<GeneratedMetadataEntry> Entries = new List<GeneratedMetadataEntry>();
         }
 
         private sealed class GeneratedNodeSnapshot
         {
+            public string ParentIdentity;
+            public string SourceIdentity;
             public string Key;
             public string TypeKey;
             public bool IsContainer;
             public List<int> TransformPath;
         }
-        private sealed class LayerUITypeSnapshot
-        {
-            public GUIType UIType;
-        }
+
         internal bool Initiated => psdInstance != null;
         /// <summary>
         /// 已经解析的 PSD 文档实例。AI 分析包导出时需要它访问图层的原生 PSD 像素坐标
@@ -554,10 +585,17 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 RefreshNodesBindLayer();
             }
+            Undo.undoRedoPerformed -= RefreshAiBindingsAfterUndo;
+            Undo.undoRedoPerformed += RefreshAiBindingsAfterUndo;
+            PrefabStage.prefabSaving -= SaveAuthoringDocument;
+            PrefabStage.prefabSaving += SaveAuthoringDocument;
+            SceneView.duringSceneGui -= OnSceneGUI;
             SceneView.duringSceneGui += OnSceneGUI;
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
+            EditorApplication.hierarchyWindowItemByEntityIdOnGUI -= OnHierarchyGUI;
             EditorApplication.hierarchyWindowItemByEntityIdOnGUI += OnHierarchyGUI;
 #else
+            EditorApplication.hierarchyWindowItemOnGUI -= OnHierarchyGUI;
             EditorApplication.hierarchyWindowItemOnGUI += OnHierarchyGUI;
 #endif
         }
@@ -718,14 +756,14 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         private static GameObject HierarchyIdToGameObject(
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             EntityId entityId
 #else
             int instanceId
 #endif
         )
         {
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             return EditorUtility.EntityIdToObject(entityId) as GameObject;
 #else
             return EditorUtility.InstanceIDToObject(instanceId) as GameObject;
@@ -733,14 +771,14 @@ namespace UGF.EditorTools.Psd2UGUI
         }
 
         private static
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             EntityId
 #else
             int
 #endif
             GetObjectId(UnityEngine.Object obj)
         {
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             return obj.GetEntityId();
 #else
             return obj.GetInstanceID();
@@ -748,7 +786,7 @@ namespace UGF.EditorTools.Psd2UGUI
         }
 
         private void OnHierarchyGUI(
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             EntityId entityId,
 #else
             int instanceID,
@@ -757,7 +795,7 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (Event.current == null) return;
             var node = HierarchyIdToGameObject(
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
                 entityId
 #else
                 instanceID
@@ -854,18 +892,45 @@ namespace UGF.EditorTools.Psd2UGUI
         /// <param name="exportImg"></param>
         private void SetExportImageTg(GameObject[] selects, bool exportImg)
         {
-            var selectLayerNodes = selects.Where(item => item?.GetComponent<PsdLayerNode>() != null).ToArray();
-            foreach (var layer in selectLayerNodes)
+            // 只改属于本编辑树的选择，避免多选里混进别的文档时串改。
+            var selectLayerNodes = selects
+                .Where(item => item != null && item.transform != null && item.transform.IsChildOf(transform))
+                .Select(item => item.GetComponent<PsdLayerNode>())
+                .Where(node => node != null)
+                .ToArray();
+            Undo.SetCurrentGroupName("批量设置导出图片");
+            int undoGroup = Undo.GetCurrentGroup();
+            foreach (var node in selectLayerNodes)
             {
-                layer.GetComponent<PsdLayerNode>().markToExport = exportImg;
+                // 逐个 Record+SetDirty：只记被点那个节点的话，其余改动撤销不掉、关掉 prefab 就丢。
+                Undo.RecordObject(node, "批量设置导出图片");
+                node.markToExport = exportImg;
+                EditorUtility.SetDirty(node);
             }
+            Undo.CollapseUndoOperations(undoGroup);
+        }
+
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
+        private void OnDisable()
+        {
+            Undo.undoRedoPerformed -= RefreshAiBindingsAfterUndo;
+            PrefabStage.prefabSaving -= SaveAuthoringDocument;
+            SceneView.duringSceneGui -= OnSceneGUI;
+#if UNITY_6000_3_OR_NEWER
+            EditorApplication.hierarchyWindowItemByEntityIdOnGUI -= OnHierarchyGUI;
+#else
+            EditorApplication.hierarchyWindowItemOnGUI -= OnHierarchyGUI;
+#endif
         }
 
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         private void OnDestroy()
         {
+            if (Instance == this) Instance = null;
+            Undo.undoRedoPerformed -= RefreshAiBindingsAfterUndo;
+            PrefabStage.prefabSaving -= SaveAuthoringDocument;
             SceneView.duringSceneGui -= OnSceneGUI;
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             EditorApplication.hierarchyWindowItemByEntityIdOnGUI -= OnHierarchyGUI;
 #else
             EditorApplication.hierarchyWindowItemOnGUI -= OnHierarchyGUI;
@@ -875,6 +940,14 @@ namespace UGF.EditorTools.Psd2UGUI
                 psdInstance.Dispose();
                 psdInstance = null;
             }
+        }
+
+        private void RefreshAiBindingsAfterUndo()
+        {
+            if (psdInstance == null) return;
+            foreach (var node in GetComponentsInChildren<PsdLayerNode>(true))
+                if (node.IsAiTarget) node.InitPsdLayers(psdInstance);
+            if (uiDocument != null) SaveUiDocument();
         }
 
         private void RefreshNodesBindLayer()
@@ -950,13 +1023,6 @@ namespace UGF.EditorTools.Psd2UGUI
 
             return false;
         }
-        internal bool CheckPsdAssetHasChanged()
-        {
-            var assetPath = PsdAssetName;
-            if (string.IsNullOrWhiteSpace(assetPath)) return false;
-            var fileTag = GetAssetChangeTag(assetPath);
-            return psdAssetChangeTime.CompareTo(fileTag) != 0;
-        }
         private static string GetAssetChangeTag(string fileName)
         {
             return new FileInfo(fileName).LastWriteTimeUtc.ToString("yyyyMMddHHmmss");
@@ -971,7 +1037,7 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         private static void OpenPrefab(string prefabName)
         {
-#if UNITY_2021_1_OR_NEWER
+#if UNITY_2021_2_OR_NEWER
             var guid = AssetDatabase.GUIDFromAssetPath(prefabName);
             var canonicalPath = guid.Empty() ? prefabName : AssetDatabase.GUIDToAssetPath(guid);
             PrefabStageUtility.OpenPrefab(canonicalPath);
@@ -985,7 +1051,7 @@ namespace UGF.EditorTools.Psd2UGUI
         /// </summary>
         /// <param name="psdPath"></param>
         /// <returns></returns>
-        internal static bool ParsePsd2LayerPrefab(string psdFile, Psd2UIFormConverter instanceRoot = null, bool keepExistingUIType = false, bool openPrefabAfterSave = true)
+        internal static bool ParsePsd2LayerPrefab(string psdFile, Psd2UIFormConverter instanceRoot = null, bool openPrefabAfterSave = true)
         {
             psdFile = NormalizeAssetPath(psdFile);
             if (string.IsNullOrWhiteSpace(psdFile) || !File.Exists(psdFile))
@@ -1016,7 +1082,7 @@ namespace UGF.EditorTools.Psd2UGUI
             bool needDestroyInstance = instanceRoot == null;
             if (instanceRoot != null)
             {
-                return ParsePsdLayer2Root(psdFile, instanceRoot, keepExistingUIType);
+                return ParsePsdLayer2Root(psdFile, instanceRoot);
             }
             else
             {
@@ -1029,7 +1095,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
                 rootLayer.psdAssetChangeTime = GetAssetChangeTag(psdFile);
                 rootLayer.SetPsdAsset(psdFile);
-                if (!ParsePsdLayer2Root(psdFile, rootLayer, keepExistingUIType))
+                if (!ParsePsdLayer2Root(psdFile, rootLayer))
                 {
                     if (needDestroyInstance) GameObject.DestroyImmediate(rootLayer.gameObject);
                     return false;
@@ -1037,11 +1103,12 @@ namespace UGF.EditorTools.Psd2UGUI
 
                 rootLayer.gameObject.name = System.IO.Path.GetFileNameWithoutExtension(prefabFile);
                 PrefabUtility.SaveAsPrefabAsset(rootLayer.gameObject, prefabFile, out bool savePrefabSuccess);
+                if (!savePrefabSuccess) Debug.LogError($"保存图层编辑 prefab 失败: {prefabFile}");
                 if (needDestroyInstance) GameObject.DestroyImmediate(rootLayer.gameObject);
                 AssetDatabase.Refresh();
                 var currentStagePath = StageUtility.GetCurrentStage()?.assetPath;
                 bool isSameStagePrefab = !string.IsNullOrWhiteSpace(currentStagePath)
-                    && AssetDatabase.GUIDFromAssetPath(currentStagePath) == AssetDatabase.GUIDFromAssetPath(prefabFile);
+                    && AssetDatabase.AssetPathToGUID(currentStagePath) == AssetDatabase.AssetPathToGUID(prefabFile);
                 if (savePrefabSuccess && openPrefabAfterSave && !isSameStagePrefab)
                 {
                     OpenPrefab(prefabFile);
@@ -1050,10 +1117,9 @@ namespace UGF.EditorTools.Psd2UGUI
                 return savePrefabSuccess;
             }
         }
-        private static bool ParsePsdLayer2Root(string psdFile, Psd2UIFormConverter converter, bool keepExistingUIType = false)
+        private static bool ParsePsdLayer2Root(string psdFile, Psd2UIFormConverter converter)
         {
             EditorUtility.DisplayProgressBar("解析PSD", $"正在解析{psdFile}", 0);
-            var preservedUITypes = keepExistingUIType ? converter.CaptureLayerUITypeSnapshot() : null;
 
             try
             {
@@ -1066,20 +1132,42 @@ namespace UGF.EditorTools.Psd2UGUI
                         return false;
                     }
 
-                    //清空已有节点重新解析
-                    for (int i = converter.transform.childCount - 1; i >= 0; i--)
-                    {
-                        GameObject.DestroyImmediate(converter.transform.GetChild(i).gameObject);
-                    }
-
                     int totalCount = psd.CountAllLayers();
                     int parsedCount = 0;
                     int nextBindIndex = 0;
-                    for (int i = 0; i < rootLayers.Length; i++)
+                    // 先在暂存容器里解析：中途抛异常时原来那份 _UIFormEditor 节点树不会被清空覆盖掉。
+                    // 暂存容器带上与编辑根同尺寸的 RectTransform，解析期算 rect/轴心才是同一套数。
+                    var staging = new GameObject("PSD2UIForm_ParseStaging", typeof(RectTransform));
+                    staging.hideFlags = HideFlags.HideAndDontSave;
+                    if (converter.transform is RectTransform converterRect)
                     {
-                        var rootLayer = rootLayers[i] as PsdLayer;
-                        if (rootLayer == null) continue;
-                        ParsePsdLayerRecursive(rootLayer, converter.transform, ref nextBindIndex, ref parsedCount, totalCount);
+                        var stagingRect = (RectTransform)staging.transform;
+                        stagingRect.anchorMin = Vector2.zero;
+                        stagingRect.anchorMax = Vector2.zero;
+                        stagingRect.pivot = converterRect.pivot;
+                        stagingRect.sizeDelta = converterRect.rect.size;
+                        stagingRect.anchoredPosition = Vector2.zero;
+                        stagingRect.localScale = converterRect.localScale;
+                    }
+                    try
+                    {
+                        for (int i = 0; i < rootLayers.Length; i++)
+                        {
+                            var rootLayer = rootLayers[i] as PsdLayer;
+                            if (rootLayer == null) continue;
+                            ParsePsdLayerRecursive(rootLayer, staging.transform, ref nextBindIndex, ref parsedCount, totalCount);
+                        }
+
+                        if (parsedCount <= 0 || staging.transform.childCount == 0)
+                        {
+                            throw new InvalidOperationException($"PSD 未产出任何节点，保留原编辑树: {psdFile}");
+                        }
+
+                        converter.SynchronizeSourceNodes(staging.transform);
+                    }
+                    finally
+                    {
+                        UnityEngine.Object.DestroyImmediate(staging);
                     }
 
                     converter.RefreshDocumentPreviewSprite(psd, psdFile);
@@ -1092,10 +1180,6 @@ namespace UGF.EditorTools.Psd2UGUI
                     converter.psdInstance = null;
                 }
                 converter.RefreshNodesBindLayer();
-                if (keepExistingUIType)
-                {
-                    converter.RestoreLayerUITypeSnapshot(preservedUITypes);
-                }
                 converter.ApplyGroupDerivedStates();
                 var childrenNodes = converter.GetComponentsInChildren<PsdLayerNode>(true);
                 foreach (var item in childrenNodes)
@@ -1103,6 +1187,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     item.RefreshUIHelper(false);
                 }
                 EditorUtility.SetDirty(converter.gameObject);
+                converter.SaveUiDocument();
                 return true;
             }
             catch (Exception e)
@@ -1429,7 +1514,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
                 byte[] rawData = new byte[rgba64.Length * sizeof(ushort)];
                 Buffer.BlockCopy(rgba64, 0, rawData, 0, rawData.Length);
-                var texture = new Texture2D(canvasWidth, canvasHeight, TextureFormat.RGBA64, false, false);
+                var texture = new Texture2D(canvasWidth, canvasHeight, GraphicsFormat.R16G16B16A16_UNorm, TextureCreationFlags.None);
                 texture.LoadRawTextureData(rawData);
                 texture.Apply(false, false);
                 return texture;
@@ -1861,7 +1946,8 @@ namespace UGF.EditorTools.Psd2UGUI
         private static PsdLayerNode CreatePsdLayerNode(PsdLayer layer, int bindLayerIdx)
         {
             string nodeName = layer.GetDisplayName();
-            nodeName = UGUIParser.Instance.GetSafeLayerName(nodeName, bindLayerIdx);
+            var parser = UGUIParser.Instance;
+            nodeName = parser != null ? parser.GetSafeLayerName(nodeName, bindLayerIdx) : nodeName;
             var node = new GameObject(nodeName, typeof(RectTransform));
             node.gameObject.tag = "EditorOnly";
             node.transform.localPosition = Vector3.zero;
@@ -1869,7 +1955,9 @@ namespace UGF.EditorTools.Psd2UGUI
             node.transform.localScale = Vector3.one;
             var layerNode = node.AddComponent<PsdLayerNode>();
             layerNode.BindPsdLayerIndex = bindLayerIdx;
+            if (layer.TryGetLayerId(out int sourceLayerId) && sourceLayerId > 0) layerNode.bindPsdLayerId = sourceLayerId;
             InitLayerNodeData(layerNode, layer);
+            layerNode.CaptureSourcePresentation();
             return layerNode;
         }
 
@@ -1885,7 +1973,8 @@ namespace UGF.EditorTools.Psd2UGUI
             layerNode.SetSourceLayerName(layer.GetDisplayName());
             layerNode.BindPsdLayer = layer;
             layerNode.SetGroupGenerationState(false, -1);
-            if (UGUIParser.Instance.TryParse(layerNode, out var initRule))
+            var parser = UGUIParser.Instance;
+            if (parser != null && parser.TryParse(layerNode, out var initRule))
             {
                 layerNode.SetUIType(initRule.UIType, false);
             }
@@ -1902,11 +1991,12 @@ namespace UGF.EditorTools.Psd2UGUI
         internal void ApplyGroupDerivedStates(bool logOpacityConflicts = false)
         {
             var nodes = GetComponentsInChildren<PsdLayerNode>(true);
+            foreach (var node in nodes) if (node.IsAiTarget) return;
             if (nodes == null || nodes.Length == 0) return;
 
             foreach (var node in nodes)
             {
-                if (node == null) continue;
+                if (node == null || node.IsAiAuthoritative) continue;
 
                 node.SetGroupOpacityRasterization(false);
                 node.SetGroupGenerationState(false, -1);
@@ -1920,7 +2010,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     var textSource = FindGroupTextSource(node);
                     if (textSource != null)
                     {
-                        node.SetGroupGenerationState(true, textSource.BindPsdLayerIndex);
+                        node.SetGroupGenerationState(true, textSource.BindPsdLayerIndex, textSource.bindPsdLayerId);
                         node.markToExport = false;
                     }
                     else
@@ -1954,6 +2044,7 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 var node = nodes[i];
                 if (node == null
+                    || node.IsAiAuthoritative
                     || node.LayerType != PsdLayerType.LayerGroup
                     || node.BindPsdLayer == null
                     || node.BakesGroupOpacityIntoGeneratedImage)
@@ -2039,7 +2130,8 @@ namespace UGF.EditorTools.Psd2UGUI
                     continue;
                 }
 
-                if (descendant.HasReusePrefabReference || IsBehavioralGroupOpacityType(descendant.UIType))
+                if (descendant.HasReuseReference || descendant.HasReusePrefabReference
+                    || (descendant.UIType != GUIType.Null && descendant.UIType != GUIType.Panel))
                 {
                     return false;
                 }
@@ -2088,31 +2180,6 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
                 node.RefreshUIHelper(false);
             }
-        }
-
-        internal bool NormalizeLocalStructure(bool registerUndo, out string summary)
-        {
-            summary = "未执行本地归一化。";
-            if (!PsdStructureNormalizer.Normalize(this, registerUndo, out var report))
-            {
-                summary = report != null ? report.BuildSummary() : "本地归一化失败。";
-                return false;
-            }
-
-            summary = report != null ? report.BuildSummary() : "本地归一化完成。";
-            if (report != null)
-            {
-                for (int i = 0; i < report.Operations.Count; i++)
-                {
-                    Debug.Log($"[PSD2UIForm.Normalize] {report.Operations[i]}");
-                }
-                for (int i = 0; i < report.Warnings.Count; i++)
-                {
-                    Debug.LogWarning("[PSD2UIForm.Normalize] " + report.Warnings[i]);
-                }
-            }
-
-            return true;
         }
 
         private static PsdLayerNode FindGroupTextSource(PsdLayerNode groupNode)
@@ -2191,33 +2258,58 @@ namespace UGF.EditorTools.Psd2UGUI
         internal void ExportSprites()
         {
             ApplyGroupDerivedStates();
-            ResolveLayerNameLookup();
-            var exportLayers = this.GetComponentsInChildren<PsdLayerNode>().Where(node => node.NeedExportImage());
+            var nodes = GetComponentsInChildren<PsdLayerNode>();
+            var collapsed = new List<Transform>();
+            foreach (var node in nodes)
+                if (node.CollapseChildrenForGeneration || !node.IsAiAuthoritative && (node.HasReuseReference || node.HasReusePrefabReference))
+                    collapsed.Add(node.transform);
+            nodes = nodes.Where(node => !IsChildOfCollapsedRoot(node.transform, collapsed)).ToArray();
+            var exportLayers = nodes.Where(node => node.NeedExportImage()).ToArray();
             var exportDir = GetUIFormImagesOutputDir();
+            if (string.IsNullOrWhiteSpace(exportDir))
+            {
+                Debug.LogError("导出图片中止：图片输出目录无效（原因见上一条错误）。");
+                return;
+            }
             if (!Directory.Exists(exportDir))
             {
                 Directory.CreateDirectory(exportDir);
             }
+            ExportSharedReferenceSprites(nodes);
             int exportIdx = 0;
-            int totalCount = exportLayers.Count();
-            foreach (var layer in exportLayers)
+            int totalCount = exportLayers.Length;
+            using (var imageBatch = new PsdImageExportBatch(this))
             {
-                var assetName = layer.ExportImageAsset();
-                if (assetName == null)
+                try
                 {
-                    Debug.LogWarning($"导出图层[name:{layer.name}, layerIdx:{layer.BindPsdLayerIndex}]图片失败!");
+                    foreach (var layer in exportLayers)
+                    {
+                        string assetName = null;
+                        try { assetName = layer.ExportImageAsset(); }
+                        catch (Exception ex) { RecordGenerationIssue(layer, "image_export_failed", ex.Message); }
+                        if (assetName == null)
+                        {
+                            Debug.LogWarning($"导出图层[name:{layer.name}, layerIdx:{layer.BindPsdLayerIndex}]图片失败!");
+                        }
+                        ++exportIdx;
+                        EditorUtility.DisplayProgressBar($"导出进度({exportIdx}/{totalCount})", $"处理UI图片:{layer.name}", exportIdx / (float)totalCount);
+                    }
+                    imageBatch.Complete(null);
                 }
-                ++exportIdx;
-                EditorUtility.DisplayProgressBar($"导出进度({exportIdx}/{totalCount})", $"导出UI图片:{assetName}", exportIdx / (float)totalCount);
+                finally
+                {
+                    // 单张图抛异常也不能把模态进度条留在屏幕上，后续按钮看着像整个失效了。
+                    EditorUtility.ClearProgressBar();
+                }
+                AssetDatabase.Refresh();
             }
-            EditorUtility.ClearProgressBar();
-            AssetDatabase.Refresh();
         }
         /// <summary>
         /// 根据解析后的节点树生成UIForm Prefab
         /// </summary>
         internal void GenerateUIForm(PsdLayerNode exportNode = null)
         {
+            if (exportNode != null) { UpdateUIFormNode(exportNode); return; }
             if (Psd2UIFormSettings.Instance.UseUIFormOutputDir && string.IsNullOrWhiteSpace(Psd2UIFormSettings.Instance.UIFormOutputDir))
             {
                 Debug.LogError($"生成UIForm失败! UIForm导出路径为空:{Psd2UIFormSettings.Instance.UIFormOutputDir}");
@@ -2244,6 +2336,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     ExportUIPrefab(rootNode, selectDir);
                 }
             }
+            ReportStaleGeneratedImages();
         }
         internal void ExportAsPrefab(PsdLayerNode targetLogic)
         {
@@ -2310,7 +2403,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 Selection.activeGameObject = uiPrefab;
             }
         }
-        private bool ExportUIPrefab(Transform root, string outputDir)
+        private bool ExportUIPrefab(Transform root, string outputDir, PsdLayerNode updateScope = null)
         {
             if (!string.IsNullOrWhiteSpace(outputDir))
             {
@@ -2334,28 +2427,16 @@ namespace UGF.EditorTools.Psd2UGUI
                 return false;
             }
             RefreshNodesBindLayer();
+            outputDir = NormalizeAssetDirectory(outputDir);
             var prefabName = Path.Combine(outputDir, $"{uiFormName}.prefab");
-            if (root == this.transform && File.Exists(prefabName))
+            string trackedOutput = AssetDatabase.GUIDToAssetPath(Document.uiFormGuid);
+            if (root == transform && !string.IsNullOrEmpty(trackedOutput)) prefabName = trackedOutput;
+            if (File.Exists(prefabName) && FindGeneratedMetadataEntry(prefabName) == null)
             {
-                int option = EditorUtility.DisplayDialogComplex(
-                    "警告",
-                    $"prefab文件已存在, 请选择生成方式:{prefabName}",
-                    "覆盖生成(不丢失引用)",
-                    "取消",
-                    "重新生成");
-                if (option == 2)
-                {
-                    if (!AssetDatabase.DeleteAsset(prefabName))
-                    {
-                        Debug.LogError($"重新生成UIForm失败: 删除旧prefab失败:{prefabName}");
-                        return false;
-                    }
-                    AssetDatabase.Refresh();
-                }
-                else if (option == 1)
-                {
-                    return false;
-                }
+                // An unregistered prefab may be user-authored. Never claim its objects by name.
+                if (updateScope != null) return false;
+                prefabName = AssetDatabase.GenerateUniqueAssetPath(prefabName);
+                RecordGenerationIssue(null, "unregistered_output", "原文件没有节点身份记录，生成独立资产: " + prefabName);
             }
             var layerNodes = root.GetComponentsInChildren<PsdLayerNode>(true);
             var prefabRefRoots = new List<PsdLayerNode>();
@@ -2375,7 +2456,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     while (parent != null && parent != root)
                     {
                         var parentNode = parent.GetComponent<PsdLayerNode>();
-                        if (parentNode != null && parentNode.HasReusePrefabReference)
+                        if (parentNode != null && parentNode.HasReusePrefabReference && !parentNode.IsAiAuthoritative)
                         {
                             hasPrefabAncestor = true;
                             break;
@@ -2396,21 +2477,14 @@ namespace UGF.EditorTools.Psd2UGUI
                 foreach (var prefabRef in prefabRefRoots)
                 {
                     if (prefabRef == null) continue;
-                    if (transform == prefabRef.transform || transform.IsChildOf(prefabRef.transform)) return true;
+                    if (transform == prefabRef.transform || !prefabRef.IsAiAuthoritative && transform.IsChildOf(prefabRef.transform)) return true;
                 }
                 return false;
             }
 
             var nodesForBuild = layerNodes.Where(node => node != null && !IsInsidePrefabRef(node.transform)).ToArray();
             NormalizePreferredUIHelpersForGeneration(nodesForBuild);
-            ResolveLayerNameLookup();
-            referencedLayerKeys.Clear();
-            foreach (var node in nodesForBuild)
-            {
-                if (!node.HasReuseReference || string.IsNullOrEmpty(node.ReuseTargetKey)) continue;
-                referencedLayerKeys.Add(node.ReuseTargetKey);
-            }
-            ExportSharedReferenceSprites(nodesForBuild);
+            ExportSharedReferenceSprites(updateScope == null ? nodesForBuild : updateScope.GetComponentsInChildren<PsdLayerNode>(true));
 
             var uiHelpers = GetAvailableUIHelpers(root);
             if (uiHelpers != null && uiHelpers.Length > 0 && prefabRefRoots.Count > 0)
@@ -2425,218 +2499,937 @@ namespace UGF.EditorTools.Psd2UGUI
                     }
                 }
             }
-            if ((uiHelpers == null || uiHelpers.Length < 1) && prefabRefRoots.Count < 1)
+            if ((uiHelpers == null || uiHelpers.Length < 1) && prefabRefRoots.Count < 1 && FindGeneratedMetadataEntry(prefabName) == null)
             {
                 return false;
             }
-            GameObject uiFormRoot;
-            var existingUiFormPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabName);
-            if (existingUiFormPrefab == null)
+
+            var uiPrefab = RunPrefabGeneration(
+                root, rootLayerNode, nodesForBuild, uiHelpers, prefabRefRoots,
+                rootHelper: null, prefabAssetPath: prefabName, prefabRootName: uiFormName,
+                isFullFormExport: root == this.transform, updateScope: updateScope);
+            if (uiPrefab != null)
             {
-                if (UGUIParser.Instance.UIFormTemplate == null)
+                Selection.activeGameObject = uiPrefab;
+            }
+            return uiPrefab != null;
+        }
+
+        private readonly HashSet<UIHelperBase> failedGenerationHelpers = new HashSet<UIHelperBase>();
+        private readonly List<AiRecognitionIssue> pendingGenerationIssues = new List<AiRecognitionIssue>();
+
+        internal void RecordGenerationIssue(PsdLayerNode node, string code, string reason)
+        {
+            var issues = GenerationContext.Current != null ? GenerationContext.Current.GenerationIssues : pendingGenerationIssues;
+            string id = node != null ? AiNodeIdUtility.GetNodeId(this, node) : string.Empty;
+            if (!issues.Exists(issue => issue.nodeId == id && issue.code == code && issue.reason == reason))
+                issues.Add(new AiRecognitionIssue { nodeId = id, code = code, action = "保留独立元素并继续其他单元", reason = reason });
+#if EFUN_DEBUG
+            Debug.LogWarning("[PSD2UIForm] " + code + ": " + reason, node);
+#endif
+        }
+
+        private sealed class BuildProgress
+        {
+            public int Current;
+            public int Total;
+        }
+
+        /// <summary>
+        /// 覆盖生成核心:contents 原地编辑(LoadPrefabContents → 就地修改 → SaveAsPrefabAsset → finally UnloadPrefabContents)。
+        /// 未被销毁的对象 fileID 全部保留 —— 引用保持的唯一根基。流程:Analyze(调用方完成) → Match(树对齐) → Build → Save+Capture。
+        /// </summary>
+        private GameObject RunPrefabGeneration(
+            Transform exportRoot,
+            PsdLayerNode exportRootNode,
+            PsdLayerNode[] nodesForBuild,
+            UIHelperBase[] uiHelpers,
+            List<PsdLayerNode> prefabRefRoots,
+            UIHelperBase rootHelper,
+            string prefabAssetPath,
+            string prefabRootName,
+            bool isFullFormExport,
+            PsdLayerNode updateScope = null)
+        {
+            var existingPrefabAsset = AssetDatabase.LoadAssetAtPath<GameObject>(prefabAssetPath);
+            bool editingExisting = existingPrefabAsset != null;
+            if (updateScope != null && !editingExisting) throw new InvalidOperationException("局部更新需要已关联的 UIForm prefab。");
+
+            // 目标 prefab 正打开在 Prefab Mode 时 LoadPrefabContents 会抛 InvalidOperationException,提前拦截
+            if (editingExisting)
+            {
+                var currentStage = PrefabStageUtility.GetCurrentPrefabStage();
+                if (currentStage != null && !string.IsNullOrWhiteSpace(currentStage.assetPath)
+                    && AssetDatabase.AssetPathToGUID(currentStage.assetPath) == AssetDatabase.AssetPathToGUID(prefabAssetPath))
                 {
-                    Debug.LogError("生成UIForm失败: UIFormTemplate为空");
-                    return false;
+                    Debug.LogError($"覆盖生成prefab失败: 目标prefab正打开在Prefab Mode, 请先关闭后再生成: {prefabAssetPath}");
+                    return null;
                 }
+            }
 
-                uiFormRoot = GameObject.Instantiate(UGUIParser.Instance.UIFormTemplate, Vector3.zero, Quaternion.identity);
-                uiFormRoot.transform.localScale = Vector3.one;
-            }
-            else
+            GameObject contentsRoot = null;
+            bool contentsLoaded = false;
+            bool contextStarted = true;
+            var context = GenerationContext.Begin();
+            context.GenerationIssues.AddRange(pendingGenerationIssues);
+            var rootHelperForTree = rootHelper;
+            var generationTimer = System.Diagnostics.Stopwatch.StartNew();
+            using (var imageBatch = new PsdImageExportBatch(this))
             {
-                uiFormRoot = GameObject.Instantiate(existingUiFormPrefab);// PrefabUtility.LoadPrefabContents(prefabName);
-                RestoreGeneratedKeysFromMetadata(prefabName, uiFormRoot);
-            }
-            uiFormRoot.name = uiFormName;
-            var activeGeneratedKeys = new HashSet<string>(StringComparer.Ordinal);
-            string incrementalScopePathKey = null;
-            if (root != this.transform)
-            {
-                incrementalScopePathKey = GetGameObjectHierarchyPathKey(root.gameObject, this.transform);
-                if (!string.IsNullOrEmpty(incrementalScopePathKey))
+                try
                 {
-                    CollectExistingGeneratedKeys(uiFormRoot.transform, activeGeneratedKeys,
-                        generatedKey => !IsPathInScope(generatedKey.Key, incrementalScopePathKey));
-                }
-            }
-            Vector3 canvasPosition = Vector3.zero;
-            var uiFormRect = uiFormRoot.GetComponent<RectTransform>();
-            if (uiFormRect != null)
-            {
-                canvasPosition = uiFormRect.anchoredPosition;
-            }
-            int curIdx = 0;
-            int totalCount = uiHelpers.Length;
-            var generatedUiHelpers = new List<UIHelperBase>(totalCount);
-            var generatedUiElements = new List<GameObject>(totalCount);
-            foreach (var uiHelper in uiHelpers)
-            {
-                if (uiHelper == null || uiHelper.LayerNode == null) continue;
-
-                EditorUtility.DisplayProgressBar($"生成UIFrom:({curIdx++}/{totalCount})", $"正在生成UI元素:{uiHelper.name}", curIdx /
-                (float)totalCount);
-                var elementPathKey = GetGameObjectHierarchyPathKey(uiHelper.gameObject, this.transform);
-                var goPath = GetGameObjectHierarchyParentPath(uiHelper.gameObject, this.transform, out var goNames);
-                var parentNode = GetOrCreateNodeByHierarchyPath(uiFormRoot, goPath, goNames, activeGeneratedKeys);
-                var reusableNode = TryGetReusableGeneratedNode(parentNode.transform, uiHelper, elementPathKey);
-                var uiElement = uiHelper.CreateUI(reusableNode);
-                if (uiElement == null) continue;
-
-                SetGeneratedNodeKey(uiElement, elementPathKey, uiHelper.LayerNode.UIType.ToString(), false, activeGeneratedKeys);
-                RemoveConsumedGeneratedDependencyNodes(uiElement, uiHelper, this.transform);
-                PreserveGeneratedDependencyNodes(uiElement, uiHelper, this.transform, activeGeneratedKeys);
-                uiElement.transform.SetParent(parentNode.transform, true);
-                ApplyGeneratedSiblingIndex(uiElement.transform, uiHelper.transform);
-                uiElement.transform.position += canvasPosition;
-                uiElement.transform.localScale = Vector3.one;
-                uiHelper.OnUIParented(uiElement);
-                generatedUiHelpers.Add(uiHelper);
-                generatedUiElements.Add(uiElement);
-            }
-            if (prefabRefRoots.Count > 0)
-            {
-                int prefabIdx = 0;
-                int prefabTotal = prefabRefRoots.Count;
-                foreach (var prefabRefNode in prefabRefRoots)
-                {
-                    if (prefabRefNode == null || !prefabRefNode.HasReusePrefabReference) continue;
-
-                    EditorUtility.DisplayProgressBar($"生成UIFrom-引用prefab:({prefabIdx++}/{prefabTotal})", $"正在实例化prefab:{prefabRefNode.ReusePrefabDisplayName}", prefabIdx / (float)prefabTotal);
-                    if (!TryGetOrCreateSharedPrefabAsset(prefabRefNode, out var prefabAsset) || prefabAsset == null)
+                    if (editingExisting)
                     {
-                        Debug.LogWarning($"引用prefab未找到且导出失败: {prefabRefNode.ReusePrefabDisplayName}");
-                        continue;
+                        contentsRoot = PrefabUtility.LoadPrefabContents(prefabAssetPath);
+                        contentsLoaded = true;
                     }
-
-                    var pathKey = GetGameObjectHierarchyPathKey(prefabRefNode.gameObject, this.transform);
-                    var goPath = GetGameObjectHierarchyParentPath(prefabRefNode.gameObject, this.transform, out var goNames);
-                    var parentNode = GetOrCreateNodeByHierarchyPath(uiFormRoot, goPath, goNames, activeGeneratedKeys);
-                    var prefabInstance = TryGetReusableGeneratedPrefabNode(parentNode.transform, prefabRefNode, pathKey, prefabAsset);
-                    if (prefabInstance == null)
+                    else if (rootHelper != null)
                     {
-                        prefabInstance = PrefabUtility.InstantiatePrefab(prefabAsset) as GameObject;
-                        if (prefabInstance == null)
+                        try
                         {
-                            prefabInstance = GameObject.Instantiate(prefabAsset);
+                            if (!failedGenerationHelpers.Contains(rootHelper)) contentsRoot = rootHelper.CreateUI(null);
+                            if (contentsRoot == null) throw new InvalidOperationException("Root Helper has no usable output.");
+                        }
+                        catch (Exception ex)
+                        {
+                            RecordGenerationIssue(rootHelper.LayerNode, "root_helper_failed", ex.Message);
+                            contentsRoot = new GameObject(prefabRootName, typeof(RectTransform));
+                            rootHelper = null;
                         }
                     }
-                    prefabInstance.name = string.IsNullOrEmpty(prefabRefNode.ReusePrefabKey)
-                        ? prefabAsset.name
-                        : PsdLayerNode.GetReferenceLeafName(prefabRefNode.ReusePrefabKey, prefabAsset.name);
-                    prefabInstance.transform.localRotation = Quaternion.identity;
-                    prefabInstance.transform.localScale = Vector3.one;
-                    var prefabRect = prefabInstance.GetComponent<RectTransform>();
-                    if (prefabRect != null)
+                    else if (isFullFormExport && UGUIParser.Instance.UIFormTemplate != null)
                     {
-                        UGUIParser.SetRectTransform(prefabRefNode, prefabRect);
+                        contentsRoot = GameObject.Instantiate(UGUIParser.Instance.UIFormTemplate, Vector3.zero, Quaternion.identity);
+                        contentsRoot.transform.localScale = Vector3.one;
                     }
                     else
                     {
-                        Debug.LogWarning($"引用prefab缺少RectTransform: {prefabAsset.name}");
-                    }
-
-                    SetGeneratedNodeKey(prefabInstance, pathKey, GeneratedPrefabReferenceTypeKey, false, activeGeneratedKeys);
-                    prefabInstance.transform.SetParent(parentNode.transform, true);
-                    ApplyGeneratedSiblingIndex(prefabInstance.transform, prefabRefNode.transform);
-                    prefabInstance.transform.position += canvasPosition;
-                    prefabInstance.transform.localScale = Vector3.one;
-                }
-            }
-
-            SynchronizeGeneratedGroupOpacities(this.transform, uiFormRoot, nodesForBuild);
-            NotifyGeneratedHierarchyReady(generatedUiHelpers, generatedUiElements);
-            CleanupLegacyUiStringKeys(uiFormRoot);
-            CleanupStaleGeneratedNodes(uiFormRoot.transform, activeGeneratedKeys);
-            FitGeneratedContainerHierarchy(uiFormRoot.transform);
-            var generatedNodeSnapshots = CaptureGeneratedNodeSnapshots(uiFormRoot);
-            CleanupTransientGeneratedKeys(uiFormRoot);
-
-            uiFormRoot.name = System.IO.Path.GetFileNameWithoutExtension(prefabName);
-            var uiPrefab = PrefabUtility.SaveAsPrefabAsset(uiFormRoot, prefabName);
-            if (uiPrefab != null)
-            {
-                SaveGeneratedKeysMetadata(prefabName, uiPrefab, generatedNodeSnapshots, incrementalScopePathKey);
-                DestroyImmediate(uiFormRoot);
-                Selection.activeGameObject = uiPrefab;
-            }
-
-            EditorUtility.ClearProgressBar();
-            return true;
-        }
-
-        private GameObject GetOrCreateNodeByHierarchyPath(GameObject uiFormRoot, string[] goPath, string[] goNames, HashSet<string> activeGeneratedKeys)
-        {
-            GameObject result = uiFormRoot;
-            if (goPath != null && goNames != null)
-            {
-                for (int i = 0; i < goPath.Length; i++)
-                {
-                    var nodeKey = goPath[i];
-                    var legacyNodeName = goNames[i];
-                    var nodeName = PsdLayerNode.GetGeneratedObjectName(legacyNodeName);
-                    var targetNode = FindGeneratedChildByPath(result.transform, nodeKey, false);
-                    bool useExistingUiNode = targetNode != null
-                        && IsActiveGeneratedNode(activeGeneratedKeys, targetNode.GetComponent<PsdGeneratedKey>());
-                    if (targetNode == null)
-                    {
-                        targetNode = FindGeneratedChild(result.transform, nodeKey, GeneratedContainerTypeKey, true);
-                    }
-                    if (targetNode == null)
-                    {
-                        targetNode = FindLegacyChildByName(result.transform, nodeName, true);
-                    }
-                    if (targetNode == null && !string.Equals(legacyNodeName, nodeName, StringComparison.Ordinal))
-                    {
-                        targetNode = FindLegacyChildByName(result.transform, legacyNodeName, true);
-                    }
-                    if (targetNode == null)
-                    {
-                        targetNode = new GameObject(nodeName, typeof(RectTransform));
-                        targetNode.layer = UnityEngine.LayerMask.NameToLayer("UI");
-                        targetNode.transform.SetParent(result.transform, false);
-                        targetNode.transform.localPosition = Vector3.zero;
-                        targetNode.transform.localRotation = Quaternion.identity;
-                        targetNode.transform.localScale = Vector3.one;
-                    }
-                    targetNode.name = nodeName;
-                    if (!useExistingUiNode)
-                    {
-                        if (targetNode.GetComponent<PsdGeneratedKey>() != null)
+                        contentsRoot = new GameObject(prefabRootName, typeof(RectTransform));
+                        contentsRoot.layer = UnityEngine.LayerMask.NameToLayer("UI");
+                        contentsRoot.transform.localPosition = Vector3.zero;
+                        contentsRoot.transform.localRotation = Quaternion.identity;
+                        contentsRoot.transform.localScale = Vector3.one;
+                        if (exportRootNode != null)
                         {
-                            StripManagedGeneratedRootComponents(targetNode);
+                            UGUIParser.SetRectTransform(exportRootNode, contentsRoot.transform);
                         }
-                        SetGeneratedNodeKey(targetNode, nodeKey, GeneratedContainerTypeKey, true, activeGeneratedKeys);
                     }
-                    result = targetNode;
+                    if (contentsRoot == null)
+                    {
+                        if (isFullFormExport)
+                        {
+                            Debug.LogError("生成UIForm失败: UIFormTemplate为空");
+                        }
+                        return null;
+                    }
+
+                    var previousMetadata = FindGeneratedMetadataEntry(prefabAssetPath);
+                    Dictionary<string, GameObject> previousGeneratedBySourceIdentity = null;
+                    Dictionary<GameObject, string> previousTypeKeys = null;
+                    HashSet<GameObject> knownGeneratedNodes = null;
+                    GameObject propertyScope = null;
+                    if (editingExisting)
+                    {
+                        previousGeneratedBySourceIdentity = RestoreGeneratedIdentityMap(prefabAssetPath, contentsRoot, out knownGeneratedNodes, out previousTypeKeys);
+                        if (updateScope != null && !previousGeneratedBySourceIdentity.TryGetValue(updateScope.PersistentId, out propertyScope))
+                            throw new InvalidOperationException("局部更新的目标对象不存在，保留原 prefab。");
+                    }
+                    var propertyBaseline = previousMetadata != null ? previousMetadata.Properties : new List<PsdPropertyRecord>();
+                    var propertyState = new PsdManagedProperties(contentsRoot, existingPrefabAsset, propertyBaseline, propertyScope);
+                    var existingScripts = new HashSet<MonoBehaviour>(editingExisting ? contentsRoot.GetComponentsInChildren<MonoBehaviour>(true) : Array.Empty<MonoBehaviour>());
+                    if (editingExisting)
+                        foreach (var current in contentsRoot.GetComponentsInChildren<Transform>(true))
+                        {
+                            context.ExistingOutputObjects.Add(current.gameObject);
+                            foreach (var component in current.GetComponents<Component>()) if (component != null) context.ExistingOutputObjects.Add(component);
+                        }
+                    if (updateScope == null) NormalizeOverlayCanvasRootScaleForGeneration(contentsRoot);
+
+                    // 生成期间禁用 Canvas:contents 场景里 Canvas 系统会持续重算 Overlay 根
+                    // (scale 归零、root rect 变为窗口尺寸、root 世界坐标偏移到 rect 左下角),
+                    // 导致"以图层中心为世界坐标"的定位写入错位(界面不在 Canvas 中心)。
+                    // 禁用后根保持 scale=1、位于原点,行为与编辑器场景一致(HEAD 版生成路径)。
+                    var rootCanvas = contentsRoot.GetComponent<Canvas>();
+                    bool rootCanvasWasEnabled = rootCanvas != null && rootCanvas.enabled;
+                    if (rootCanvas != null)
+                    {
+                        rootCanvas.enabled = false;
+                        // 防御:禁用前 Canvas 系统可能已把根摆到 rect 左下角/缩放归零,统一复位
+                        if (updateScope == null)
+                        {
+                            contentsRoot.transform.localPosition = Vector3.zero;
+                            contentsRoot.transform.localRotation = Quaternion.identity;
+                            contentsRoot.transform.localScale = Vector3.one;
+                        }
+                    }
+
+                    // 根处理
+                    Quaternion rootLocalRotation = Quaternion.identity;
+                    bool retainedRoot = false;
+                    if (rootHelper != null && editingExisting && previousMetadata != null
+                        && !string.IsNullOrEmpty(previousMetadata.RootTypeKey) && previousMetadata.RootTypeKey != rootHelper.LayerNode.UIType.ToString())
+                    {
+                        RecordGenerationIssue(rootHelper.LayerNode, "component_migration_pending", "独立 prefab 根类型变化，保留已有组件引用。");
+                        retainedRoot = true;
+                        rootHelper = null;
+                    }
+                    if (rootHelper != null && contentsLoaded)
+                    {
+                        // 根是 UI 元素且覆盖现有 prefab:原地复用/重建根
+                        var capturedEvents = UnityEventPreserver.Capture(contentsRoot);
+                        GUIType? previousRootUIType = null;
+                        var previousRootTypeKey = previousMetadata?.RootTypeKey ?? rootHelper.LayerNode.UIType.ToString();
+                        if (Enum.TryParse(previousRootTypeKey, out GUIType parsedPreviousRootUIType))
+                        {
+                            previousRootUIType = parsedPreviousRootUIType;
+                        }
+                        GameObject rebuiltRoot = null;
+                        try { rebuiltRoot = rootHelper.CreateUI(null, contentsRoot, previousRootUIType); }
+                        catch (Exception ex) { RecordGenerationIssue(rootHelper.LayerNode, "root_helper_failed", ex.Message); }
+                        UnityEventPreserver.Restore(rebuiltRoot != null ? rebuiltRoot : contentsRoot, capturedEvents);
+                        if (rebuiltRoot == null)
+                        {
+                            rootHelper = null;
+                            retainedRoot = true;
+                            context.FailedOutputRoots.Add(contentsRoot);
+                        }
+                        else
+                        {
+                            contentsRoot = rebuiltRoot;
+                        }
+                    }
+                    if (rootHelper != null)
+                    {
+                        contentsRoot.name = prefabRootName;
+                        contentsRoot.layer = UnityEngine.LayerMask.NameToLayer("UI");
+                        if (rootHelper.LayerNode != null && rootHelper.LayerNode.TryGetTextUnityRotation(out _))
+                        {
+                            rootLocalRotation = contentsRoot.transform.localRotation;
+                        }
+                        contentsRoot.transform.localPosition = Vector3.zero;
+                        contentsRoot.transform.localRotation = Quaternion.identity;
+                        contentsRoot.transform.localScale = Vector3.one;
+                    }
+                    else if (editingExisting && !isFullFormExport && !retainedRoot)
+                    {
+                        // 子树导出且根不是元素:覆盖旧容器根
+                        if (contentsRoot.GetComponent<RectTransform>() == null)
+                        {
+                            Debug.LogError($"覆盖生成prefab失败: 旧prefab根节点不是RectTransform, 保留原资产避免丢失引用: {prefabAssetPath}");
+                            return null;
+                        }
+                        StripManagedGeneratedRootComponents(contentsRoot);
+                        contentsRoot.name = prefabRootName;
+                        contentsRoot.layer = UnityEngine.LayerMask.NameToLayer("UI");
+                        contentsRoot.transform.localPosition = Vector3.zero;
+                        contentsRoot.transform.localRotation = Quaternion.identity;
+                        contentsRoot.transform.localScale = Vector3.one;
+                        if (exportRootNode != null)
+                        {
+                            UGUIParser.SetRectTransform(exportRootNode, contentsRoot.transform);
+                        }
+                    }
+                    else
+                    {
+                        contentsRoot.name = prefabRootName;
+                    }
+
+                    var desiredRoots = BuildDesiredTree(exportRoot, rootHelperForTree, nodesForBuild, uiHelpers, prefabRefRoots, context);
+                    if (rootHelper == null && rootHelperForTree != null && !retainedRoot)
+                    {
+                        var independent = new HashSet<Transform>();
+                        foreach (var desired in desiredRoots) if (desired.LayerNode != null) independent.Add(desired.LayerNode.transform);
+                        BuildBasicGenerationSources(rootHelperForTree.LayerNode, contentsRoot.transform, independent);
+                    }
+
+                    if (editingExisting)
+                    {
+                        GeneratedTreeMatcher.Match(
+                            context, contentsRoot, desiredRoots, previousGeneratedBySourceIdentity, knownGeneratedNodes);
+                        FillPreviousTypeKeys(desiredRoots, previousTypeKeys);
+                    }
+                    // 新资产的节点保持 Create 决策。
+                    if (updateScope != null)
+                        desiredRoots = SelectWriteScope(updateScope, desiredRoots, context, previousGeneratedBySourceIdentity, prefabAssetPath);
+
+                    // Build
+                    var generatedUiHelpers = new List<UIHelperBase>(uiHelpers != null ? uiHelpers.Length : 0);
+                    var generatedUiElements = new List<GameObject>(uiHelpers != null ? uiHelpers.Length : 0);
+                    var progress = new BuildProgress { Total = uiHelpers != null ? uiHelpers.Length : 0 };
+                    foreach (var desiredRoot in desiredRoots)
+                    {
+                        BuildGeneratedNodeRecursive(desiredRoot, contentsRoot.transform, exportRoot, generatedUiHelpers, generatedUiElements, progress);
+                    }
+
+                    // 后处理
+                    if (updateScope == null) SynchronizeGeneratedGroupOpacities(exportRoot, contentsRoot, nodesForBuild);
+                    NotifyGeneratedHierarchyReady(generatedUiHelpers, generatedUiElements);
+                    if (rootHelper != null)
+                    {
+                        try { rootHelper.OnGeneratedHierarchyReady(contentsRoot); }
+                        catch (Exception ex)
+                        {
+                            context.FailedOutputRoots.Add(contentsRoot);
+                            RecordGenerationIssue(rootHelper.LayerNode, "root_postprocess_failed", ex.Message);
+                        }
+                    }
+                    int orderIssues = updateScope == null ? PsdGeneratedDrawOrder.Reconcile(context, exportRoot, contentsRoot.transform)
+                        : ReconcileScopedOrder(updateScope, context);
+                    if (orderIssues > 0) RecordGenerationIssue(exportRootNode, "template_draw_order", orderIssues + " 个模板范围存在顺序交错，已保留独立元素供调整。");
+                    ParkOrphans(context.NodesToOrphan, contentsRoot.transform);
+                    if (rootHelper != null)
+                    {
+                        // 根 Text/TMP 元素的旋转在根归一化后恢复(旧行为保持)
+                        contentsRoot.transform.localRotation = rootLocalRotation;
+                    }
+                    if (updateScope == null) FitGeneratedContainerHierarchy(contentsRoot.transform);
+                    else UpdateScopedScrollBounds(updateScope, context, propertyState);
+                    RemoveGeneratedScripts(contentsRoot, existingScripts);
+                    imageBatch.Complete(contentsRoot);
+                    propertyState.Merge(context);
+                    var generatedNodeSnapshots = CaptureGeneratedNodeSnapshots(
+                        contentsRoot, context, previousGeneratedBySourceIdentity, previousTypeKeys);
+
+                    // 保存:未被销毁的对象 fileID 全部保留,外部引用不丢。
+                    // Canvas 保持禁用状态保存(contents 场景里一旦恢复,Canvas 系统会立即把根 scale 重算为 0)。
+                    contentsRoot.name = System.IO.Path.GetFileNameWithoutExtension(prefabAssetPath);
+                    var savedPrefab = PrefabUtility.SaveAsPrefabAsset(contentsRoot, prefabAssetPath);
+                    if (savedPrefab == null)
+                    {
+                        // 保存失败必须报错：否则界面看着"生成完成"，prefab 其实还是旧的。
+                        Debug.LogError($"生成 UIForm 失败：Prefab 保存返回空, 目标={prefabAssetPath}, 本次生成结果已丢弃", this);
+                    }
+                    if (savedPrefab != null)
+                    {
+                        SaveGeneratedMetadata(prefabAssetPath, savedPrefab, generatedNodeSnapshots);
+                        var savedMetadata = FindGeneratedMetadataEntry(prefabAssetPath);
+                        savedMetadata.Properties = propertyState.Save(savedPrefab, propertyBaseline);
+                        savedMetadata.RootTypeKey = retainedRoot ? previousMetadata?.RootTypeKey : rootHelperForTree?.LayerNode.UIType.ToString();
+                        if (isFullFormExport) Document.uiFormGuid = AssetDatabase.AssetPathToGUID(prefabAssetPath);
+                        SaveUiDocument(prefabAssetPath);
+                        string prefabGuid = AssetDatabase.AssetPathToGUID(prefabAssetPath);
+                        // GUID 为空时所有报告都写进同一个 ".json"，彼此覆盖。
+                        string reportKey = string.IsNullOrEmpty(prefabGuid)
+                            ? "unimported-" + AiPathDefaults.GetStableToken(prefabAssetPath.ToLowerInvariant())
+                            : prefabGuid;
+                        string reportPath = Path.Combine("Library", "PSD2UIForm", "generation-reports", reportKey + ".json");
+                        int generatedCount = 0, retainedCount = 0, unresolvedCount = 0;
+                        foreach (var pair in context.DesiredToGenerated)
+                        {
+                            if (context.WriteScope != null && !context.WriteScope.Contains(pair.Key.SourceIdentity)) continue;
+                            if (pair.Key.PreservePreviousType || context.FailedOutputRoots.Contains(pair.Value))
+                            {
+                                if (pair.Key.ReuseGo != null) retainedCount++;
+                                else unresolvedCount++;
+                            }
+                            else generatedCount++;
+                        }
+                        if (rootHelperForTree != null)
+                        {
+                            if (retainedRoot || context.FailedOutputRoots.Contains(contentsRoot))
+                            {
+                                if (editingExisting) retainedCount++;
+                                else unresolvedCount++;
+                            }
+                            else if (rootHelper != null) generatedCount++;
+                            else unresolvedCount++;
+                        }
+                        AiJobFileUtility.WriteJson(reportPath, new PsdGenerationReport { prefabPath = prefabAssetPath,
+                            status = context.GenerationIssues.Count == 0 ? "complete" : "partial_success", generatedUnitCount = generatedCount,
+                            retainedUnitCount = retainedCount, unresolvedUnitCount = unresolvedCount,
+                            basicElementCount = context.BasicElementCount, elapsedMilliseconds = generationTimer.ElapsedMilliseconds, issues = context.GenerationIssues });
+                        if (context.GenerationIssues.Count > 0) Debug.LogWarning("[PSD2UIForm] 局部生成报告: " + Path.GetFullPath(reportPath), this);
+                    }
+                    if (savedPrefab != null && rootCanvas != null)
+                    {
+                        // 保存后在资产对象上恢复 Canvas 状态与根 scale(资产对象不在场景中,Canvas 系统不会重算,scale 保持 1)
+                        var assetCanvas = savedPrefab.GetComponent<Canvas>();
+                        if (assetCanvas != null)
+                        {
+                            assetCanvas.enabled = rootCanvasWasEnabled;
+                            EditorUtility.SetDirty(assetCanvas);
+                        }
+                        if (updateScope == null) NormalizeOverlayCanvasRootScaleForGeneration(savedPrefab);
+                        EditorUtility.SetDirty(savedPrefab.transform);
+                        AssetDatabase.SaveAssets();
+                    }
+                    return savedPrefab;
+                }
+                finally
+                {
+                    EditorUtility.ClearProgressBar();
+                    if (contextStarted)
+                    {
+                        GenerationContext.End();
+                    }
+                    if (contentsRoot != null)
+                    {
+                        if (contentsLoaded)
+                        {
+                            PrefabUtility.UnloadPrefabContents(contentsRoot);
+                        }
+                        else
+                        {
+                            DestroyImmediate(contentsRoot);
+                        }
+                    }
                 }
             }
-            return result;
         }
 
-        private static bool IsActiveGeneratedNode(HashSet<string> activeGeneratedKeys, PsdGeneratedKey generatedKey)
+        /// <summary>
+        /// 构建期望树:元素(helper 节点)+ prefabRef 根 + 容器(已覆盖节点的祖先链)。
+        /// 模板子节点(如按钮文本)不属于期望树,由各 helper 在其元素内自行复用/更新。
+        /// </summary>
+        private List<GeneratedTreeNode> BuildDesiredTree(
+            Transform exportRoot,
+            UIHelperBase rootHelper,
+            PsdLayerNode[] sources,
+            UIHelperBase[] uiHelpers,
+            List<PsdLayerNode> prefabRefRoots,
+            GenerationContext context)
         {
-            if (activeGeneratedKeys == null || generatedKey == null) return false;
-            return activeGeneratedKeys.Contains(BuildGeneratedCompositeKey(generatedKey.Key, generatedKey.TypeKey, generatedKey.IsContainer));
+            var nodeMap = new Dictionary<PsdLayerNode, GeneratedTreeNode>();
+            var roots = new List<GeneratedTreeNode>();
+
+            // 1) 元素节点(根元素除外)
+            if (uiHelpers != null)
+            {
+                for (int i = 0; i < uiHelpers.Length; i++)
+                {
+                    var helper = uiHelpers[i];
+                    if (helper == null || helper.LayerNode == null) continue;
+                    if (rootHelper != null && helper == rootHelper) continue;
+                    nodeMap[helper.LayerNode] = new GeneratedTreeNode
+                    {
+                        LayerNode = helper.LayerNode,
+                        Helper = helper,
+                    };
+                }
+            }
+
+            var knownContainers = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var output in Document.outputs)
+                foreach (var entry in output.Entries) if (entry.IsContainer) knownContainers.Add(entry.SourceIdentity);
+            foreach (var source in sources)
+            {
+                if (source.transform == exportRoot || source.HasMissingSource || source.IsUnassignedSource
+                    || !source.gameObject.activeInHierarchy || source.HasReusePrefabReference || nodeMap.ContainsKey(source)) continue;
+                bool container = source.UIType == GUIType.Null && knownContainers.Contains(source.PersistentId);
+                if (container || source.UIType != GUIType.Null && source.IsMainUIType && source.GetComponent<UIHelperBase>() == null)
+                    nodeMap.Add(source, new GeneratedTreeNode { LayerNode = source, IsContainer = container });
+            }
+
+            // 2) prefabRef 根
+            if (prefabRefRoots != null)
+            {
+                for (int i = 0; i < prefabRefRoots.Count; i++)
+                {
+                    var prefabRefNode = prefabRefRoots[i];
+                    if (prefabRefNode == null) continue;
+                    if (!nodeMap.ContainsKey(prefabRefNode))
+                    {
+                        nodeMap[prefabRefNode] = new GeneratedTreeNode
+                        {
+                            LayerNode = prefabRefNode,
+                            IsPrefabRef = true,
+                        };
+                    }
+                }
+            }
+
+            // 3) 容器:为已建节点补祖先链
+            var createdNodes = new List<GeneratedTreeNode>(nodeMap.Values);
+            for (int i = 0; i < createdNodes.Count; i++)
+            {
+                var current = createdNodes[i].LayerNode.transform.parent;
+                while (current != null && current != exportRoot)
+                {
+                    var ancestorNode = current.GetComponent<PsdLayerNode>();
+                    if (ancestorNode != null && !nodeMap.ContainsKey(ancestorNode))
+                    {
+                        var ancestorHelper = ancestorNode.IsMainUIType ? ancestorNode.GetComponent<UIHelperBase>() : null;
+                        nodeMap[ancestorNode] = new GeneratedTreeNode
+                        {
+                            LayerNode = ancestorNode,
+                            Helper = ancestorHelper,
+                            IsContainer = ancestorHelper == null,
+                        };
+                    }
+                    current = current.parent;
+                }
+            }
+
+            // 4) 父子链接 + 身份填充
+            foreach (var treeNode in nodeMap.Values)
+            {
+                GeneratedTreeNode parent = null;
+                var current = treeNode.LayerNode.transform.parent;
+                while (current != null && current != exportRoot)
+                {
+                    var ancestorNode = current.GetComponent<PsdLayerNode>();
+                    if (ancestorNode != null && nodeMap.TryGetValue(ancestorNode, out parent))
+                    {
+                        break;
+                    }
+                    current = current.parent;
+                }
+
+                treeNode.Parent = parent;
+                if (parent != null)
+                {
+                    parent.Children.Add(treeNode);
+                }
+                else
+                {
+                    roots.Add(treeNode);
+                }
+
+                FillTreeNodeIdentity(treeNode, exportRoot);
+                context.DesiredNodeByLayer[treeNode.LayerNode] = treeNode;
+            }
+
+            // 5) 子节点按源兄弟序排序
+            SortDesiredChildren(roots);
+            return roots;
         }
 
-        private static void ApplyGeneratedSiblingIndex(Transform generatedTransform, Transform sourceTransform)
+        private static void SortDesiredChildren(List<GeneratedTreeNode> nodes)
         {
-            if (generatedTransform == null || sourceTransform == null || generatedTransform.parent == null) return;
-            generatedTransform.SetSiblingIndex(sourceTransform.GetSiblingIndex());
+            nodes.Sort((left, right) => CompareSiblingIndex(left, right));
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                SortDesiredChildren(nodes[i].Children);
+            }
         }
 
-        private static void NotifyGeneratedHierarchyReady(List<UIHelperBase> helpers, List<GameObject> elements)
+        private static int CompareSiblingIndex(GeneratedTreeNode left, GeneratedTreeNode right)
+        {
+            int leftIndex = left != null && left.LayerNode != null ? left.LayerNode.transform.GetSiblingIndex() : -1;
+            int rightIndex = right != null && right.LayerNode != null ? right.LayerNode.transform.GetSiblingIndex() : -1;
+            return leftIndex.CompareTo(rightIndex);
+        }
+
+        private void FillTreeNodeIdentity(GeneratedTreeNode treeNode, Transform exportRoot)
+        {
+            treeNode.GeneratedName = PsdLayerNode.GetGeneratedObjectName(treeNode.LayerNode.name);
+            treeNode.SourceIdentity = GetSourceIdentity(treeNode.LayerNode);
+        }
+
+        private static void FillPreviousTypeKeys(
+            List<GeneratedTreeNode> nodes,
+            Dictionary<GameObject, string> previousTypeKeys)
+        {
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                var node = nodes[i];
+                if (node.ReuseGo != null)
+                {
+                    if (previousTypeKeys == null
+                        || !previousTypeKeys.TryGetValue(node.ReuseGo, out node.PreviousTypeKey)
+                        || string.IsNullOrEmpty(node.PreviousTypeKey))
+                    {
+                        node.PreviousTypeKey = GeneratedTreeMatcher.DeriveTypeKeyFromComponents(node.ReuseGo);
+                    }
+                }
+                FillPreviousTypeKeys(node.Children, previousTypeKeys);
+            }
+        }
+
+        private void BuildGeneratedNodeRecursive(
+            GeneratedTreeNode node,
+            Transform fallbackParent,
+            Transform exportRoot,
+            List<UIHelperBase> generatedUiHelpers,
+            List<GameObject> generatedUiElements,
+            BuildProgress progress)
+        {
+            var context = GenerationContext.Current;
+            Transform parent = node.Parent != null
+                && context.DesiredToGenerated.TryGetValue(node.Parent, out var parentGo)
+                && parentGo != null
+                ? parentGo.transform
+                : fallbackParent;
+
+            GameObject generated = null;
+            if (context.WriteScope != null && node.Parent != null && parent != null)
+            {
+                var scroll = parent.GetComponent<ScrollRect>();
+                if (scroll != null && scroll.content != null) parent = scroll.content;
+            }
+            if (!node.IsPrefabRef && context.HelperRoots.TryGetValue(node.LayerNode, out var embedded) && embedded != null)
+            {
+                generated = embedded;
+                if (node.ReuseGo != null && node.ReuseGo != embedded) OrphanReuseGo(context, node.ReuseGo);
+                context.NodesToOrphan.Remove(embedded);
+                generatedUiHelpers.Add(node.Helper);
+                generatedUiElements.Add(embedded);
+            }
+            else if (node.ReuseGo != null && !string.IsNullOrEmpty(node.PreviousTypeKey) && node.PreviousTypeKey != GetDesiredTypeKey(node))
+            {
+                generated = node.ReuseGo;
+                node.PreservePreviousType = true;
+                RecordGenerationIssue(node.LayerNode, "component_migration_pending", "UI 类型发生变化；保留已有组件引用，等待明确迁移。");
+            }
+            else if (node.IsContainer)
+            {
+                generated = BuildGeneratedContainer(node, parent);
+            }
+            else if (node.IsPrefabRef)
+            {
+                try { generated = BuildGeneratedPrefabRef(node, parent); }
+                catch (Exception ex) { RecordGenerationIssue(node.LayerNode, "prefab_reference_failed", ex.Message); }
+                if (generated == null)
+                {
+                    generated = node.ReuseGo != null ? node.ReuseGo : BuildBasicGenerationUnit(node, parent);
+                    context.FailedOutputRoots.Add(generated);
+                }
+            }
+            else
+            {
+                try
+                {
+                    if (node.Helper != null && failedGenerationHelpers.Contains(node.Helper)) throw new InvalidOperationException("Helper dependency parsing failed.");
+                    generated = BuildGeneratedElement(node, parent, exportRoot, progress);
+                    if (generated != null)
+                    {
+                        generatedUiHelpers.Add(node.Helper);
+                        generatedUiElements.Add(generated);
+                    }
+                    else
+                    {
+                        RecordGenerationIssue(node.LayerNode, "helper_empty", "Helper has no usable output; retaining the node and independent children.");
+                        // 旧节点是外部引用的 fileID 载体：销毁会让引用变 Missing，改为收容停用。
+                        generated = node.ReuseGo != null ? node.ReuseGo : BuildBasicGenerationUnit(node, parent);
+                        context.FailedOutputRoots.Add(generated);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    RecordGenerationIssue(node.LayerNode, "helper_build_failed", ex.Message);
+                    generated = node.ReuseGo != null ? node.ReuseGo : BuildBasicGenerationUnit(node, parent);
+                    context.FailedOutputRoots.Add(generated);
+                }
+            }
+            if (generated == null) return;
+
+            context.DesiredToGenerated[node] = generated;
+            for (int i = 0; i < node.Children.Count; i++)
+            {
+                BuildGeneratedNodeRecursive(node.Children[i], generated.transform, exportRoot, generatedUiHelpers, generatedUiElements, progress);
+            }
+        }
+
+        private GameObject BuildBasicGenerationUnit(GeneratedTreeNode node, Transform parent)
+        {
+            var root = new GameObject(node.LayerNode != null ? node.LayerNode.GetGeneratedObjectName() : "UnresolvedUI", typeof(RectTransform));
+            root.transform.SetParent(parent, false);
+            if (node.LayerNode != null && node.LayerNode.IsAiAuthoritative)
+            {
+                // A failed Helper cannot turn an AI control or role into a guessed Image/Text.
+                UGUIParser.SetRectTransform(node.LayerNode, root.transform);
+                return root;
+            }
+            var independent = new HashSet<Transform>();
+            foreach (var child in node.Children) if (child.LayerNode != null) independent.Add(child.LayerNode.transform);
+            if (node.LayerNode != null) BuildBasicGenerationSources(node.LayerNode, root.transform, independent);
+            return root;
+        }
+
+        private void BuildBasicGenerationSources(PsdLayerNode source, Transform parent, HashSet<Transform> independent)
+        {
+            if (source.IsAiAuthoritative) return;
+            if (independent.Contains(source.transform)) return;
+            if (source.HasReuseReference || source.HasReusePrefabReference) return;
+            bool text = source.IsTextLayer(out _);
+            if (text || source.LayerType != PsdLayerType.LayerGroup || source.CollapseChildrenForGeneration)
+            {
+                GameObject element = null;
+                try
+                {
+                    element = new GameObject(source.GetGeneratedObjectName(), typeof(RectTransform));
+                    element.transform.SetParent(parent, false);
+                    if (text)
+                    {
+                        var label = element.AddComponent<UnityEngine.UI.Text>();
+                        UGUIParser.SetTextStyle(source, label);
+                        UGUIParser.SetTextRectTransform(source, label);
+                        UGUIParser.SetTextRotation(source, label);
+                    }
+                    else
+                    {
+                        var image = element.AddComponent<UnityEngine.UI.Image>();
+                        UGUIParser.SetRectTransform(source, image);
+                        UGUIParser.Instance.BindImage(source, image);
+                    }
+                    if (GenerationContext.Current != null) GenerationContext.Current.BasicElementCount++;
+                }
+                catch (Exception ex)
+                {
+                    if (element != null) DestroyImmediate(element);
+                    RecordGenerationIssue(source, "basic_element_failed", ex.Message);
+                }
+                return;
+            }
+            for (int i = 0; i < source.transform.childCount; i++)
+            {
+                var child = source.transform.GetChild(i).GetComponent<PsdLayerNode>();
+                if (child != null) BuildBasicGenerationSources(child, parent, independent);
+            }
+        }
+
+        private GameObject BuildGeneratedContainer(GeneratedTreeNode node, Transform parent)
+        {
+            var context = GenerationContext.Current;
+            GameObject generated;
+            if (node.ReuseGo != null)
+            {
+                generated = node.ReuseGo;
+                if (node.Revived)
+                {
+                    generated.SetActive(true);
+                }
+                // 元素→容器:剥离旧托管组件(与旧版容器复用行为一致)
+                if (GeneratedTreeMatcher.DeriveTypeKeyFromComponents(generated) != GeneratedTreeMatcher.ContainerTypeKey)
+                {
+                    StripManagedGeneratedRootComponents(generated);
+                }
+                generated.name = PsdLayerNode.GetGeneratedObjectName(node.LayerNode.name);
+            }
+            else
+            {
+                var nodeName = PsdLayerNode.GetGeneratedObjectName(node.LayerNode.name);
+                generated = new GameObject(nodeName, typeof(RectTransform));
+                generated.layer = UnityEngine.LayerMask.NameToLayer("UI");
+                generated.transform.SetParent(parent, false);
+                generated.transform.localPosition = Vector3.zero;
+                generated.transform.localRotation = Quaternion.identity;
+                generated.transform.localScale = Vector3.one;
+            }
+
+            generated.transform.SetParent(parent, false);
+            // 构建顺序即显示顺序:按编辑器树相对顺序追加到末尾(嵌套节点位于模板子节点之后,渲染在其上方)
+            generated.transform.SetAsLastSibling();
+            generated.transform.localScale = Vector3.one;
+            context.GeneratedContainerNodes.Add(generated);
+            return generated;
+        }
+
+        private GameObject BuildGeneratedElement(GeneratedTreeNode node, Transform parent, Transform exportRoot, BuildProgress progress)
+        {
+            var context = GenerationContext.Current;
+            if (node.Helper == null || node.Helper.LayerNode == null) return null;
+
+            progress.Current++;
+            if (progress.Total > 0)
+            {
+                EditorUtility.DisplayProgressBar(
+                    $"生成UIFrom:({progress.Current}/{progress.Total})",
+                    $"正在生成UI元素:{node.Helper.name}",
+                    progress.Current / (float)progress.Total);
+            }
+
+            GameObject generated;
+            GUIType? previousUIType = null;
+            if (!string.IsNullOrEmpty(node.PreviousTypeKey)
+                && Enum.TryParse(node.PreviousTypeKey, out GUIType parsedPreviousUIType))
+            {
+                previousUIType = parsedPreviousUIType;
+            }
+            if (node.ReuseGo != null)
+            {
+                generated = node.ReuseGo;
+                if (node.Revived)
+                {
+                    generated.SetActive(true);
+                }
+                // 事件捕获/恢复:PasteComponentValues 会以模板空事件覆盖复用组件(组件重建时),必须显式保留。
+                // 兼容性由 CreateUI 内部的 CreateOrReuseRoot/IsCompatibleRoot 判定(与原版语义一致),
+                // 不可在此用组件推导类型预判换型 —— FillColor/TMPButton 等 UIType 名与组件名不一致,会误判导致组件被重建、引用丢失。
+                var capturedEvents = UnityEventPreserver.Capture(generated);
+                generated = node.Helper.CreateUI(parent, generated, previousUIType);
+                UnityEventPreserver.Restore(generated, capturedEvents);
+                if (generated == null) return null;
+            }
+            else
+            {
+                generated = node.Helper.CreateUI(parent);
+                if (generated == null) return null;
+            }
+
+            try
+            {
+                generated.name = node.LayerNode.GetGeneratedObjectName();
+                generated.transform.SetAsLastSibling();
+                return generated;
+            }
+            catch
+            {
+                if (generated != null && generated != node.ReuseGo) DestroyImmediate(generated);
+                throw;
+            }
+        }
+
+        private GameObject BuildGeneratedPrefabRef(GeneratedTreeNode node, Transform parent)
+        {
+            var context = GenerationContext.Current;
+            if (node.LayerNode == null || !TryGetOrCreateSharedPrefabAsset(node.LayerNode, out var prefabAsset) || prefabAsset == null)
+            {
+                if (node.LayerNode != null)
+                {
+                    RecordGenerationIssue(node.LayerNode, "prefab_reference_missing", "引用 prefab 未找到: " + node.LayerNode.ReusePrefabDisplayName);
+                }
+                return null;
+            }
+
+            GameObject instance = null;
+            if (node.ReuseGo != null)
+            {
+                var source = PrefabUtility.GetCorrespondingObjectFromSource(node.ReuseGo);
+                if (source == prefabAsset)
+                {
+                    instance = node.ReuseGo;
+                    if (node.Revived)
+                    {
+                        instance.SetActive(true);
+                    }
+                }
+                else
+                {
+                    RecordGenerationIssue(node.LayerNode, "prefab_migration_pending", "引用目标 prefab 变化，保留已有实例及组件引用。");
+                    context.FailedOutputRoots.Add(node.ReuseGo);
+                    return node.ReuseGo;
+                }
+            }
+            if (instance == null)
+            {
+                instance = PrefabUtility.InstantiatePrefab(prefabAsset) as GameObject;
+                if (instance == null)
+                {
+                    instance = GameObject.Instantiate(prefabAsset);
+                }
+            }
+
+            instance.name = string.IsNullOrEmpty(node.LayerNode.ReusePrefabKey)
+                ? prefabAsset.name
+                : PsdLayerNode.GetReferenceLeafName(node.LayerNode.ReusePrefabKey, prefabAsset.name);
+            instance.transform.localRotation = Quaternion.identity;
+            instance.transform.localScale = Vector3.one;
+            var prefabRect = instance.GetComponent<RectTransform>();
+            if (prefabRect == null)
+            {
+                Debug.LogWarning($"引用prefab缺少RectTransform: {prefabAsset.name}");
+            }
+
+            instance.transform.SetParent(parent, false);
+            // 构建顺序即显示顺序:按编辑器树相对顺序追加到末尾
+            instance.transform.SetAsLastSibling();
+            if (prefabRect != null)
+            {
+                UGUIParser.SetRectTransform(node.LayerNode, prefabRect);
+            }
+            instance.transform.localScale = Vector3.one;
+            return instance;
+        }
+
+        // 生成失败的旧节点是外部引用的 fileID 载体：销毁会让引用变 Missing，交给 ParkOrphans 停用收容。
+        private static void OrphanReuseGo(GenerationContext context, GameObject reuseGo)
+        {
+            if (context == null || context.NodesToOrphan == null || reuseGo == null) return;
+            if (!context.NodesToOrphan.Contains(reuseGo)) context.NodesToOrphan.Add(reuseGo);
+        }
+
+        /// <summary>
+        /// 未匹配的旧受管节点移入停用孤儿区(fileID 保留,外部引用保持有效)。
+        /// </summary>
+        private void ParkOrphans(List<GameObject> nodesToOrphan, Transform generationRoot)
+        {
+            if (nodesToOrphan == null || nodesToOrphan.Count < 1) return;
+            WarnOrphanReferenceImpacts(nodesToOrphan, generationRoot);
+
+            var orphanRoot = GetOrCreateGeneratedOrphansRoot(generationRoot);
+            for (int i = 0; i < nodesToOrphan.Count; i++)
+            {
+                var node = nodesToOrphan[i];
+                if (node == null) continue;
+                if (node.transform.parent == orphanRoot) continue;
+                node.transform.SetParent(orphanRoot, true);
+                node.SetActive(false);
+            }
+        }
+
+        /// <summary>
+        /// 会话内影响扫描:找出指向将被孤儿化子树的组件引用,提示目标会停用但引用仍保留。
+        /// </summary>
+        private static void WarnOrphanReferenceImpacts(List<GameObject> nodesToOrphan, Transform generationRoot)
+        {
+#if EFUN_DEBUG
+            if (generationRoot == null) return;
+            var orphanRoots = new HashSet<Transform>();
+            for (int i = 0; i < nodesToOrphan.Count; i++)
+            {
+                if (nodesToOrphan[i] != null)
+                {
+                    orphanRoots.Add(nodesToOrphan[i].transform);
+                }
+            }
+            if (orphanRoots.Count < 1) return;
+
+            var components = generationRoot.GetComponentsInChildren<Component>(true);
+            for (int i = 0; i < components.Length; i++)
+            {
+                var component = components[i];
+                if (component == null || component.transform == null) continue;
+                if (IsUnderAnyTransform(component.transform, orphanRoots)) continue;//孤儿子树内部
+
+                var so = new SerializedObject(component);
+                var prop = so.GetIterator();
+                while (prop.NextVisible(true))
+                {
+                    if (prop.propertyType != SerializedPropertyType.ObjectReference) continue;
+                    var target = prop.objectReferenceValue;
+                    if (target == null) continue;
+                    var targetTransform = target is Component targetComponent
+                        ? targetComponent.transform
+                        : (target is GameObject targetGo ? targetGo.transform : null);
+                    if (targetTransform != null && IsUnderAnyTransform(targetTransform, orphanRoots))
+                    {
+                        Debug.LogWarning($"孤儿化后引用仍保留,但目标会停用: {component.gameObject.name}.{prop.name} → {target.name}");
+                    }
+                }
+            }
+#endif
+        }
+
+        private static bool IsUnderAnyTransform(Transform node, HashSet<Transform> roots)
+        {
+            var current = node;
+            while (current != null)
+            {
+                if (roots.Contains(current)) return true;
+                current = current.parent;
+            }
+            return false;
+        }
+
+        private void NotifyGeneratedHierarchyReady(List<UIHelperBase> helpers, List<GameObject> elements)
         {
             if (helpers == null || elements == null) return;
 
             int count = Mathf.Min(helpers.Count, elements.Count);
-            for (int i = 0; i < count; i++)
+            // Children finish sizing before an enclosing ScrollView measures its content.
+            for (int i = count - 1; i >= 0; i--)
             {
                 var helper = helpers[i];
                 var element = elements[i];
                 if (helper == null || element == null) continue;
 
-                helper.OnGeneratedHierarchyReady(element);
+                try { helper.OnGeneratedHierarchyReady(element); }
+                catch (Exception ex)
+                {
+                    RecordGenerationIssue(helper.LayerNode, "helper_postprocess_failed", ex.Message);
+                    GenerationContext.Current.FailedOutputRoots.Add(element);
+                }
             }
         }
 
@@ -2665,9 +3458,12 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
                 else
                 {
-                    string pathKey = GetGameObjectHierarchyPathKey(sourceNode.gameObject, sourcePathRoot);
-                    generatedNode = FindGeneratedDescendantByPath(generatedRoot.transform, pathKey, false)
-                        ?? FindGeneratedDescendantByPath(generatedRoot.transform, pathKey, true);
+                    var context = GenerationContext.Current;
+                    generatedNode = context != null
+                        && context.DesiredNodeByLayer.TryGetValue(sourceNode, out var treeNode)
+                        && context.DesiredToGenerated.TryGetValue(treeNode, out var go)
+                        ? go
+                        : null;
                 }
 
                 if (generatedNode == null)
@@ -2696,22 +3492,6 @@ namespace UGF.EditorTools.Psd2UGUI
             targetCanvasGroup.alpha = shouldSynchronize ? Mathf.Clamp01(sourceOpacity) : 1f;
         }
 
-        private static string BuildGeneratedCompositeKey(string key, string typeKey, bool isContainer)
-        {
-            return $"{(isContainer ? "C" : "N")}:{typeKey}:{key}";
-        }
-
-        private static string GetLegacyGeneratedMetadataPath(string prefabAssetPath)
-        {
-            if (string.IsNullOrWhiteSpace(prefabAssetPath)) return null;
-
-            var dir = Path.GetDirectoryName(prefabAssetPath);
-            var fileName = Path.GetFileNameWithoutExtension(prefabAssetPath);
-            if (string.IsNullOrWhiteSpace(dir) || string.IsNullOrWhiteSpace(fileName)) return null;
-
-            return Path.Combine(dir, $"{fileName}.psd2uiform.generated.json").Replace("\\", "/");
-        }
-
         private static string NormalizeMetadataPrefabPath(string prefabAssetPath)
         {
             return string.IsNullOrWhiteSpace(prefabAssetPath) ? null : prefabAssetPath.Replace("\\", "/").Trim();
@@ -2725,9 +3505,34 @@ namespace UGF.EditorTools.Psd2UGUI
             return string.Equals(leftNormalized, rightNormalized, StringComparison.OrdinalIgnoreCase);
         }
 
+        private static string GetAssetGuid(string assetPath)
+        {
+            var normalizedPath = NormalizeMetadataPrefabPath(assetPath);
+            return string.IsNullOrWhiteSpace(normalizedPath) ? string.Empty : AssetDatabase.AssetPathToGUID(normalizedPath);
+        }
+
+        private string GetPsdAssetGuid()
+        {
+            return GetAssetGuid(PsdAssetName);
+        }
+
         private GeneratedMetadataSerializedEntry FindGeneratedMetadataEntry(string targetPrefabAssetPath)
         {
             if (generatedMetadataEntries == null || generatedMetadataEntries.Count < 1) return null;
+
+            var targetPrefabGuid = GetAssetGuid(targetPrefabAssetPath);
+            if (!string.IsNullOrEmpty(targetPrefabGuid))
+            {
+                for (int i = 0; i < generatedMetadataEntries.Count; i++)
+                {
+                    var entry = generatedMetadataEntries[i];
+                    if (entry == null || string.IsNullOrWhiteSpace(entry.PrefabAssetGuid)) continue;
+                    if (string.Equals(entry.PrefabAssetGuid, targetPrefabGuid, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return entry;
+                    }
+                }
+            }
 
             for (int i = 0; i < generatedMetadataEntries.Count; i++)
             {
@@ -2750,15 +3555,17 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 if (item == null
                     || string.IsNullOrWhiteSpace(item.GlobalObjectId)
-                    || string.IsNullOrWhiteSpace(item.Key)
-                    || string.IsNullOrWhiteSpace(item.TypeKey))
+                    || string.IsNullOrWhiteSpace(item.SourceIdentity))
                 {
                     continue;
                 }
 
                 result.Add(new GeneratedMetadataEntry
                 {
+                    ParentIdentity = item.ParentIdentity,
                     GlobalObjectId = item.GlobalObjectId,
+                    NodeId = item.NodeId,
+                    SourceIdentity = item.SourceIdentity,
                     Key = item.Key,
                     TypeKey = item.TypeKey,
                     IsContainer = item.IsContainer,
@@ -2766,24 +3573,6 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             return result;
-        }
-
-        private static List<GeneratedMetadataEntry> ParseGeneratedMetadataJson(string json)
-        {
-            if (string.IsNullOrWhiteSpace(json))
-            {
-                return new List<GeneratedMetadataEntry>();
-            }
-
-            try
-            {
-                var metadata = JsonUtility.FromJson<GeneratedMetadataCollection>(json);
-                return CloneGeneratedMetadataEntries(metadata?.Entries);
-            }
-            catch
-            {
-                return new List<GeneratedMetadataEntry>();
-            }
         }
 
         private void CleanupGeneratedMetadataEntries()
@@ -2801,16 +3590,18 @@ namespace UGF.EditorTools.Psd2UGUI
                 var normalizedPath = NormalizeMetadataPrefabPath(entry?.PrefabAssetPath);
                 if (string.IsNullOrWhiteSpace(normalizedPath)) continue;
                 var normalizedEntries = CloneGeneratedMetadataEntries(entry.Entries);
-                if (normalizedEntries.Count < 1)
-                {
-                    normalizedEntries = ParseGeneratedMetadataJson(entry.Json);
-                }
-                if (normalizedEntries.Count < 1) continue;
 
-                map[normalizedPath] = new GeneratedMetadataSerializedEntry
+                var prefabGuid = !string.IsNullOrWhiteSpace(entry.PrefabAssetGuid)
+                    ? entry.PrefabAssetGuid
+                    : GetAssetGuid(normalizedPath);
+                var mapKey = string.IsNullOrWhiteSpace(prefabGuid) ? normalizedPath : prefabGuid;
+                map[mapKey] = new GeneratedMetadataSerializedEntry
                 {
+                    Properties = entry.Properties,
+                    RootTypeKey = entry.RootTypeKey,
                     PrefabAssetPath = normalizedPath,
-                    Json = null,
+                    PrefabAssetGuid = prefabGuid,
+                    PsdAssetGuid = entry.PsdAssetGuid,
                     Entries = normalizedEntries,
                 };
             }
@@ -2820,20 +3611,11 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private void MarkGeneratedMetadataDirty()
         {
-            EditorUtility.SetDirty(this);
-            PrefabUtility.RecordPrefabInstancePropertyModifications(this);
-            if (gameObject != null && gameObject.scene.IsValid())
-            {
-                EditorSceneManager.MarkSceneDirty(gameObject.scene);
-            }
-            AssetDatabase.SaveAssets();
+            EditorUtility.SetDirty(Document);
         }
 
         internal string GetGeneratedMetadataHostAssetPathForDebug()
-        {
-            var assetPath = AssetDatabase.GetAssetPath(gameObject);
-            return string.IsNullOrWhiteSpace(assetPath) ? "<Scene Object>" : assetPath;
-        }
+            => AssetDatabase.GetAssetPath(Document);
 
         internal string[] GetGeneratedMetadataTargetsForDebug()
         {
@@ -2866,109 +3648,215 @@ namespace UGF.EditorTools.Psd2UGUI
             return JsonUtility.ToJson(metadata, true);
         }
 
-        private List<GeneratedMetadataEntry> LoadGeneratedMetadataEntries(string targetPrefabAssetPath)
+        private static string GetSourceIdentity(PsdLayerNode node)
         {
-            var entry = FindGeneratedMetadataEntry(targetPrefabAssetPath);
-            if (entry != null && entry.Entries != null && entry.Entries.Count > 0)
-            {
-                return CloneGeneratedMetadataEntries(entry.Entries);
-            }
-            if (entry != null && !string.IsNullOrWhiteSpace(entry.Json))
-            {
-                var migratedEntries = ParseGeneratedMetadataJson(entry.Json);
-                if (migratedEntries.Count > 0)
-                {
-                    SaveGeneratedMetadataEntries(targetPrefabAssetPath, migratedEntries);
-                    return migratedEntries;
-                }
-            }
-
-            var legacyMetadataPath = GetLegacyGeneratedMetadataPath(targetPrefabAssetPath);
-            if (!string.IsNullOrWhiteSpace(legacyMetadataPath) && File.Exists(legacyMetadataPath))
-            {
-                var legacyJson = File.ReadAllText(legacyMetadataPath);
-                if (!string.IsNullOrWhiteSpace(legacyJson))
-                {
-                    var migratedEntries = ParseGeneratedMetadataJson(legacyJson);
-                    if (migratedEntries.Count > 0)
-                    {
-                        SaveGeneratedMetadataEntries(targetPrefabAssetPath, migratedEntries);
-                        return migratedEntries;
-                    }
-                }
-            }
-
-            return null;
+            return node != null ? node.PersistentId : null;
         }
 
-        private void SaveGeneratedMetadataEntries(string targetPrefabAssetPath, List<GeneratedMetadataEntry> entries)
+        private Dictionary<string, GameObject> RestoreGeneratedIdentityMap(
+            string prefabAssetPath,
+            GameObject contentsRoot,
+            out HashSet<GameObject> knownGeneratedNodes,
+            out Dictionary<GameObject, string> previousTypeKeys)
         {
-            var normalizedPath = NormalizeMetadataPrefabPath(targetPrefabAssetPath);
-            if (string.IsNullOrWhiteSpace(normalizedPath))
+            var result = new Dictionary<string, GameObject>(StringComparer.Ordinal);
+            knownGeneratedNodes = new HashSet<GameObject>();
+            previousTypeKeys = new Dictionary<GameObject, string>();
+            var metadata = FindGeneratedMetadataEntry(prefabAssetPath);
+            if (metadata == null || metadata.Entries == null || metadata.Entries.Count < 1 || contentsRoot == null)
             {
-                Debug.LogWarning($"保存生成节点元数据失败: target为空, target={targetPrefabAssetPath}");
-                return;
+                return result;
             }
 
+            var psdGuid = GetPsdAssetGuid();
+            if (!string.IsNullOrEmpty(metadata.PsdAssetGuid)
+                && !string.IsNullOrEmpty(psdGuid)
+                && !string.Equals(metadata.PsdAssetGuid, psdGuid, StringComparison.OrdinalIgnoreCase))
+            {
+                return result;
+            }
+
+            var prefabAssetRoot = AssetDatabase.LoadAssetAtPath<GameObject>(prefabAssetPath);
+            if (prefabAssetRoot == null) return result;
+
+            var generatedByGlobalId = new Dictionary<string, GameObject>(StringComparer.Ordinal);
+            var assetTransforms = prefabAssetRoot.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < assetTransforms.Length; i++)
+            {
+                var transformPath = BuildTransformIndexPath(assetTransforms[i], prefabAssetRoot.transform);
+                if (transformPath == null) continue;
+                var contentsGo = ResolveTransformIndexPath(contentsRoot, transformPath);
+                if (contentsGo == null) continue;
+
+                var globalId = GlobalObjectId.GetGlobalObjectIdSlow(assetTransforms[i].gameObject).ToString();
+                if (!string.IsNullOrEmpty(globalId))
+                {
+                    generatedByGlobalId[globalId] = contentsGo;
+                }
+            }
+
+            for (int i = 0; i < metadata.Entries.Count; i++)
+            {
+                var entry = metadata.Entries[i];
+                if (entry == null
+                    || string.IsNullOrEmpty(entry.SourceIdentity)
+                    || string.IsNullOrEmpty(entry.GlobalObjectId)
+                    || !generatedByGlobalId.TryGetValue(entry.GlobalObjectId, out var generated))
+                {
+                    continue;
+                }
+
+                knownGeneratedNodes.Add(generated);
+                if (!previousTypeKeys.ContainsKey(generated))
+                {
+                    previousTypeKeys.Add(generated, entry.TypeKey);
+                }
+                if (!result.ContainsKey(entry.SourceIdentity))
+                {
+                    result.Add(entry.SourceIdentity, generated);
+                }
+            }
+            return result;
+        }
+
+        private static List<GeneratedNodeSnapshot> CaptureGeneratedNodeSnapshots(
+            GameObject contentsRoot,
+            GenerationContext context,
+            Dictionary<string, GameObject> previousGeneratedBySourceIdentity,
+            Dictionary<GameObject, string> previousTypeKeys)
+        {
+            var result = new List<GeneratedNodeSnapshot>();
+            if (contentsRoot == null || context == null) return result;
+
+            var capturedIdentities = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var pair in context.DesiredToGenerated)
+            {
+                var desired = pair.Key;
+                var generated = pair.Value;
+                if (desired == null
+                    || generated == null
+                    || string.IsNullOrEmpty(desired.SourceIdentity)
+                    || context.WriteScope != null && !context.WriteScope.Contains(desired.SourceIdentity)
+                    || !capturedIdentities.Add(desired.SourceIdentity))
+                {
+                    continue;
+                }
+
+                var transformPath = BuildTransformIndexPath(generated.transform, contentsRoot.transform);
+                if (transformPath == null) continue;
+                var typeKey = GetDesiredTypeKey(desired);
+                result.Add(new GeneratedNodeSnapshot
+                {
+                    ParentIdentity = desired.Parent?.SourceIdentity,
+                    SourceIdentity = desired.SourceIdentity,
+                    Key = desired.GeneratedName,
+                    TypeKey = typeKey,
+                    IsContainer = typeKey == GeneratedTreeMatcher.ContainerTypeKey,
+                    TransformPath = transformPath,
+                });
+            }
+
+            // 未被本轮期望树认领的旧生成节点已经进入孤儿区。继续保存其稳定身份，
+            // 使图层在后续任意一轮恢复时仍可复活原 fileID，而非退回名称匹配并新建对象。
+            if (previousGeneratedBySourceIdentity != null)
+            {
+                foreach (var pair in previousGeneratedBySourceIdentity)
+                {
+                    var sourceIdentity = pair.Key;
+                    var generated = pair.Value;
+                    if (generated == null
+                        || string.IsNullOrEmpty(sourceIdentity)
+                        || !capturedIdentities.Add(sourceIdentity))
+                    {
+                        continue;
+                    }
+
+                    var transformPath = BuildTransformIndexPath(generated.transform, contentsRoot.transform);
+                    if (transformPath == null) continue;
+
+                    // 未更新的节点沿用已记录的语义类型；组件无法区分 Panel 与普通 Image。
+                    var typeKey = previousTypeKeys[generated];
+                    result.Add(new GeneratedNodeSnapshot
+                    {
+                        ParentIdentity = FindGeneratedParentIdentity(generated.transform.parent, previousGeneratedBySourceIdentity),
+                        SourceIdentity = sourceIdentity,
+                        Key = generated.name,
+                        TypeKey = typeKey,
+                        IsContainer = string.Equals(
+                            typeKey, GeneratedTreeMatcher.ContainerTypeKey, StringComparison.Ordinal),
+                        TransformPath = transformPath,
+                    });
+                }
+            }
+
+            result.Sort((left, right) => string.CompareOrdinal(left.SourceIdentity, right.SourceIdentity));
+            return result;
+        }
+
+        private static string GetDesiredTypeKey(GeneratedTreeNode node)
+        {
+            if (node.PreservePreviousType) return node.PreviousTypeKey;
+            if (node.IsContainer) return GeneratedTreeMatcher.ContainerTypeKey;
+            if (node.IsPrefabRef) return "__PrefabRef";
+            return node.LayerNode != null ? node.LayerNode.UIType.ToString() : string.Empty;
+        }
+
+        private void SaveGeneratedMetadata(
+            string prefabAssetPath,
+            GameObject prefabAssetRoot,
+            List<GeneratedNodeSnapshot> snapshots)
+        {
+            var entries = new List<GeneratedMetadataEntry>(snapshots != null ? snapshots.Count : 0);
+            if (prefabAssetRoot != null && snapshots != null)
+            {
+                for (int i = 0; i < snapshots.Count; i++)
+                {
+                    var snapshot = snapshots[i];
+                    var savedGo = ResolveTransformIndexPath(prefabAssetRoot, snapshot.TransformPath);
+                    if (savedGo == null) continue;
+
+                    var globalId = GlobalObjectId.GetGlobalObjectIdSlow(savedGo).ToString();
+                    if (string.IsNullOrEmpty(globalId)) continue;
+
+                    entries.Add(new GeneratedMetadataEntry
+                    {
+                        ParentIdentity = snapshot.ParentIdentity,
+                        GlobalObjectId = globalId,
+                        SourceIdentity = snapshot.SourceIdentity,
+                        Key = snapshot.Key,
+                        TypeKey = snapshot.TypeKey,
+                        IsContainer = snapshot.IsContainer,
+                    });
+                }
+            }
+
+            SaveGeneratedMetadataEntries(prefabAssetPath, entries);
+        }
+
+        private void SaveGeneratedMetadataEntries(string prefabAssetPath, List<GeneratedMetadataEntry> entries)
+        {
+            var normalizedPath = NormalizeMetadataPrefabPath(prefabAssetPath);
+            if (string.IsNullOrEmpty(normalizedPath)) return;
             if (generatedMetadataEntries == null)
             {
                 generatedMetadataEntries = new List<GeneratedMetadataSerializedEntry>();
             }
 
-            var entry = FindGeneratedMetadataEntry(normalizedPath);
+            var metadata = FindGeneratedMetadataEntry(normalizedPath);
             var normalizedEntries = CloneGeneratedMetadataEntries(entries);
-            if (normalizedEntries.Count < 1)
+            if (metadata == null)
             {
-                if (entry != null)
-                {
-                    generatedMetadataEntries.Remove(entry);
-                }
+                metadata = new GeneratedMetadataSerializedEntry();
+                generatedMetadataEntries.Add(metadata);
             }
-            else
-            {
-                if (entry == null)
-                {
-                    entry = new GeneratedMetadataSerializedEntry();
-                    generatedMetadataEntries.Add(entry);
-                }
-
-                entry.PrefabAssetPath = normalizedPath;
-                entry.Entries = normalizedEntries;
-            }
+            metadata.PrefabAssetPath = normalizedPath;
+            metadata.PrefabAssetGuid = GetAssetGuid(normalizedPath);
+            metadata.PsdAssetGuid = GetPsdAssetGuid();
+            metadata.Entries = normalizedEntries;
 
             CleanupGeneratedMetadataEntries();
             MarkGeneratedMetadataDirty();
 
-            var legacyMetadataPath = GetLegacyGeneratedMetadataPath(targetPrefabAssetPath);
-            if (!string.IsNullOrWhiteSpace(legacyMetadataPath) && File.Exists(legacyMetadataPath))
-            {
-                AssetDatabase.DeleteAsset(legacyMetadataPath);
-            }
-        }
-
-        private List<GeneratedNodeSnapshot> CaptureGeneratedNodeSnapshots(GameObject root)
-        {
-            var snapshots = new List<GeneratedNodeSnapshot>();
-            if (root == null) return snapshots;
-
-            var generatedKeys = root.GetComponentsInChildren<PsdGeneratedKey>(true);
-            var rootTransform = root.transform;
-            foreach (var generatedKey in generatedKeys)
-            {
-                if (generatedKey == null) continue;
-
-                var transformPath = BuildTransformIndexPath(generatedKey.transform, rootTransform);
-                if (transformPath == null) continue;
-
-                snapshots.Add(new GeneratedNodeSnapshot
-                {
-                    Key = generatedKey.Key,
-                    TypeKey = generatedKey.TypeKey,
-                    IsContainer = generatedKey.IsContainer,
-                    TransformPath = transformPath,
-                });
-            }
-            return snapshots;
         }
 
         private static List<int> BuildTransformIndexPath(Transform target, Transform root)
@@ -2996,714 +3884,127 @@ namespace UGF.EditorTools.Psd2UGUI
                 if (childIndex < 0 || childIndex >= current.childCount) return null;
                 current = current.GetChild(childIndex);
             }
-            return current != null ? current.gameObject : null;
+            return current.gameObject;
         }
 
-        private static void CleanupTransientGeneratedKeys(GameObject root)
+        private static bool IsGeneratedOrphansRoot(Transform transform)
+        {
+            return transform != null && string.Equals(transform.name, GeneratedOrphansRootName, StringComparison.Ordinal);
+        }
+
+        // ScreenSpaceOverlay Canvas 根在 LoadPrefabContents 的孤立场景里没有显示设备,
+        // Canvas 会把根 localScale 置零,导致 SetRectTransform 的世界坐标写入被吞掉(子节点位置归零)。
+        // 生成前把退化 scale 修正为 1,使世界坐标赋值生效;Overlay Canvas 运行时会自行重算 scale,序列化值 1 是正确基线。
+        private static void NormalizeOverlayCanvasRootScaleForGeneration(GameObject root)
         {
             if (root == null) return;
+            var canvas = root.GetComponent<Canvas>();
+            if (canvas == null || canvas.renderMode != RenderMode.ScreenSpaceOverlay) return;
 
-            var generatedKeys = root.GetComponentsInChildren<PsdGeneratedKey>(true);
-            for (int i = generatedKeys.Length - 1; i >= 0; i--)
+            var scale = root.transform.localScale;
+            if (scale.x == 0f || scale.y == 0f)
             {
-                if (generatedKeys[i] != null)
-                {
-                    DestroyImmediate(generatedKeys[i]);
-                }
+                root.transform.localScale = Vector3.one;
             }
         }
 
-        private void RestoreGeneratedKeysFromMetadata(string prefabAssetPath, GameObject prefabInstance)
+        private static Transform GetOrCreateGeneratedOrphansRoot(Transform root)
         {
-            if (prefabInstance == null) return;
-
-            var metadataEntries = LoadGeneratedMetadataEntries(prefabAssetPath);
-            if (metadataEntries == null || metadataEntries.Count < 1) return;
-
-            try
-            {
-                var sourceToInstance = new Dictionary<string, GameObject>(StringComparer.Ordinal);
-                var transforms = prefabInstance.GetComponentsInChildren<Transform>(true);
-                foreach (var item in transforms)
-                {
-                    if (item == null) continue;
-                    var sourceGo = PrefabUtility.GetCorrespondingObjectFromSource(item.gameObject) as GameObject;
-                    if (sourceGo == null) continue;
-
-                    var globalId = GlobalObjectId.GetGlobalObjectIdSlow(sourceGo).ToString();
-                    if (string.IsNullOrEmpty(globalId)) continue;
-                    sourceToInstance[globalId] = item.gameObject;
-                }
-
-                foreach (var entry in metadataEntries)
-                {
-                    if (entry == null || string.IsNullOrEmpty(entry.GlobalObjectId)) continue;
-                    if (!sourceToInstance.TryGetValue(entry.GlobalObjectId, out var instanceGo) || instanceGo == null) continue;
-
-                    SetGeneratedNodeKey(instanceGo, entry.Key, entry.TypeKey, entry.IsContainer);
-                }
-            }
-            catch (Exception err)
-            {
-                Debug.LogWarning($"恢复生成节点元数据失败: {prefabAssetPath}\n{err.Message}");
-            }
-        }
-
-        private void SaveGeneratedKeysMetadata(string prefabAssetPath, GameObject prefabAssetRoot, List<GeneratedNodeSnapshot> snapshots, string incrementalScopePathKey = null)
-        {
-            try
-            {
-                if (prefabAssetRoot == null || snapshots == null || snapshots.Count < 1)
-                {
-                    SaveGeneratedMetadataEntries(prefabAssetPath, null);
-                    return;
-                }
-
-                var metadataEntries = new List<GeneratedMetadataEntry>();
-                foreach (var snapshot in snapshots)
-                {
-                    if (snapshot == null || snapshot.TransformPath == null) continue;
-
-                    var savedGo = ResolveTransformIndexPath(prefabAssetRoot, snapshot.TransformPath);
-                    if (savedGo == null) continue;
-
-                    var globalId = GlobalObjectId.GetGlobalObjectIdSlow(savedGo).ToString();
-                    if (string.IsNullOrEmpty(globalId)) continue;
-
-                    metadataEntries.Add(new GeneratedMetadataEntry
-                    {
-                        GlobalObjectId = globalId,
-                        Key = snapshot.Key,
-                        TypeKey = snapshot.TypeKey,
-                        IsContainer = snapshot.IsContainer,
-                    });
-                }
-
-                if (metadataEntries.Count < 1)
-                {
-                    SaveGeneratedMetadataEntries(prefabAssetPath, null);
-                    return;
-                }
-
-                if (!string.IsNullOrEmpty(incrementalScopePathKey))
-                {
-                    var oldMetadataEntries = LoadGeneratedMetadataEntries(prefabAssetPath);
-                    if (oldMetadataEntries != null && oldMetadataEntries.Count > 0)
-                    {
-                        var compositeKeys = new HashSet<string>(metadataEntries.Select(entry => BuildGeneratedCompositeKey(entry.Key, entry.TypeKey, entry.IsContainer)), StringComparer.Ordinal);
-                        foreach (var entry in oldMetadataEntries)
-                        {
-                            if (entry == null || IsPathInScope(entry.Key, incrementalScopePathKey)) continue;
-
-                            var compositeKey = BuildGeneratedCompositeKey(entry.Key, entry.TypeKey, entry.IsContainer);
-                            if (compositeKeys.Add(compositeKey))
-                            {
-                                metadataEntries.Add(entry);
-                            }
-                        }
-                    }
-                }
-
-                SaveGeneratedMetadataEntries(prefabAssetPath, metadataEntries);
-            }
-            catch (Exception err)
-            {
-                Debug.LogWarning($"保存生成节点元数据失败: {prefabAssetPath}\n{err.Message}");
-            }
-        }
-
-        private static bool IsPathInScope(string pathKey, string scopePathKey)
-        {
-            if (string.IsNullOrEmpty(pathKey) || string.IsNullOrEmpty(scopePathKey)) return false;
-
-            return string.Equals(pathKey, scopePathKey, StringComparison.Ordinal)
-                || pathKey.StartsWith(scopePathKey + "/", StringComparison.Ordinal);
-        }
-
-        private void CollectExistingGeneratedKeys(Transform root, HashSet<string> activeGeneratedKeys, Func<PsdGeneratedKey, bool> includePredicate)
-        {
-            if (root == null || activeGeneratedKeys == null) return;
-
             for (int i = 0; i < root.childCount; i++)
             {
                 var child = root.GetChild(i);
-                if (child == null) continue;
-
-                var generatedKey = child.GetComponent<PsdGeneratedKey>();
-                if (generatedKey != null && (includePredicate == null || includePredicate(generatedKey)))
+                if (IsGeneratedOrphansRoot(child))
                 {
-                    activeGeneratedKeys.Add(BuildGeneratedCompositeKey(generatedKey.Key, generatedKey.TypeKey, generatedKey.IsContainer));
-                }
-
-                CollectExistingGeneratedKeys(child, activeGeneratedKeys, includePredicate);
-            }
-        }
-
-        private static Type GetPrimaryRootComponentType(GameObject target)
-        {
-            if (target == null) return null;
-
-            var components = target.GetComponents<Component>();
-            for (int i = 0; i < components.Length; i++)
-            {
-                var component = components[i];
-                if (component == null || IsIgnoredRootComponent(component.GetType())) continue;
-
-                if (component is ScrollRect || component is Selectable || component is Mask)
-                {
-                    return component.GetType();
+                    child.gameObject.SetActive(false);
+                    return child;
                 }
             }
 
-            for (int i = 0; i < components.Length; i++)
-            {
-                var component = components[i];
-                if (component == null || IsIgnoredRootComponent(component.GetType())) continue;
-
-                if (component is Graphic)
-                {
-                    return component.GetType();
-                }
-            }
-
-            for (int i = 0; i < components.Length; i++)
-            {
-                var component = components[i];
-                if (component == null) continue;
-                var type = component.GetType();
-                if (!IsIgnoredRootComponent(type)) return type;
-            }
-            return null;
+            var orphanRoot = new GameObject(GeneratedOrphansRootName, typeof(RectTransform));
+            orphanRoot.transform.SetParent(root, false);
+            orphanRoot.SetActive(false);
+            return orphanRoot.transform;
         }
 
-        private static bool IsIgnoredRootComponent(Type type)
-        {
-            return type == typeof(Transform)
-                || type == typeof(RectTransform)
-                || type == typeof(CanvasRenderer)
-                || type == typeof(UIStringKey)
-                || type == typeof(PsdGeneratedKey);
-        }
+        private readonly Dictionary<PsdLayerNode, string> imageExportNames = new Dictionary<PsdLayerNode, string>();
+        private readonly Dictionary<string, PsdLayer> originalResourceLayers = new Dictionary<string, PsdLayer>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, PsdLayer> declaredResourceLayers = new Dictionary<string, PsdLayer>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> ambiguousResourceNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private bool resourceCatalogReady;
 
-        private static bool IsLikelyMatchingGeneratedRoot(GameObject existing, GUIType uiType)
-        {
-            var rule = UGUIParser.Instance?.GetRule(uiType);
-            if (rule == null || existing == null) return false;
-
-            if (rule.UIPrefab == null)
-            {
-                return existing.GetComponent<RectTransform>() != null;
-            }
-
-            var expectedType = GetPrimaryRootComponentType(rule.UIPrefab);
-            var existingType = GetPrimaryRootComponentType(existing);
-            if (expectedType == null || existingType == null)
-            {
-                return false;
-            }
-            return expectedType == existingType;
-        }
-
-        private GameObject FindGeneratedChild(Transform parent, string pathKey, string typeKey, bool isContainer)
-        {
-            if (parent == null || string.IsNullOrEmpty(pathKey) || string.IsNullOrEmpty(typeKey)) return null;
-
-            foreach (Transform child in parent)
-            {
-                if (child == null) continue;
-                var key = child.GetComponent<PsdGeneratedKey>();
-                if (key == null) continue;
-                if (key.IsContainer != isContainer) continue;
-                if (!string.Equals(key.TypeKey, typeKey, StringComparison.Ordinal)) continue;
-                if (!string.Equals(key.Key, pathKey, StringComparison.Ordinal)) continue;
-                return child.gameObject;
-            }
-            return null;
-        }
-
-        private GameObject FindGeneratedChildByPath(Transform parent, string pathKey, bool isContainer)
-        {
-            if (parent == null || string.IsNullOrEmpty(pathKey)) return null;
-
-            foreach (Transform child in parent)
-            {
-                if (child == null) continue;
-                var key = child.GetComponent<PsdGeneratedKey>();
-                if (key == null) continue;
-                if (key.IsContainer != isContainer) continue;
-                if (!string.Equals(key.Key, pathKey, StringComparison.Ordinal)) continue;
-                return child.gameObject;
-            }
-            return null;
-        }
-
-        private GameObject FindLegacyChildByName(Transform parent, string nodeName, bool isContainer, GUIType? expectedUiType = null)
-        {
-            if (parent == null || string.IsNullOrWhiteSpace(nodeName)) return null;
-
-            GameObject result = null;
-            int matchCount = 0;
-            foreach (Transform child in parent)
-            {
-                if (child == null || !string.Equals(child.name, nodeName, StringComparison.Ordinal)) continue;
-                if (child.GetComponent<PsdGeneratedKey>() != null) continue;
-
-                if (isContainer)
-                {
-                    if (GetPrimaryRootComponentType(child.gameObject) != null) continue;
-                }
-                else if (expectedUiType.HasValue && !IsLikelyMatchingGeneratedRoot(child.gameObject, expectedUiType.Value))
-                {
-                    continue;
-                }
-
-                result = child.gameObject;
-                matchCount++;
-                if (matchCount > 1)
-                {
-                    return null;
-                }
-            }
-            return result;
-        }
-
-        private void SetGeneratedNodeKey(GameObject go, string pathKey, string typeKey, bool isContainer, HashSet<string> activeGeneratedKeys = null)
-        {
-            if (go == null || string.IsNullOrEmpty(pathKey) || string.IsNullOrEmpty(typeKey)) return;
-
-            var generatedKey = go.GetComponent<PsdGeneratedKey>() ?? go.AddComponent<PsdGeneratedKey>();
-            generatedKey.Key = pathKey;
-            generatedKey.TypeKey = typeKey;
-            generatedKey.IsContainer = isContainer;
-            activeGeneratedKeys?.Add(BuildGeneratedCompositeKey(pathKey, typeKey, isContainer));
-        }
-
-        private static void CleanupLegacyUiStringKeys(GameObject root)
-        {
-            if (root == null) return;
-
-            var uiStrKeys = root.GetComponentsInChildren<UIStringKey>(true);
-            for (int i = uiStrKeys.Length - 1; i >= 0; i--)
-            {
-                if (uiStrKeys[i] != null)
-                {
-                    DestroyImmediate(uiStrKeys[i]);
-                }
-            }
-        }
-
-        private void CleanupStaleGeneratedNodes(Transform root, HashSet<string> activeGeneratedKeys)
-        {
-            if (root == null || activeGeneratedKeys == null) return;
-
-            for (int i = root.childCount - 1; i >= 0; i--)
-            {
-                var child = root.GetChild(i);
-                if (child == null) continue;
-
-                var generatedKey = child.GetComponent<PsdGeneratedKey>();
-                if (generatedKey != null)
-                {
-                    var compositeKey = BuildGeneratedCompositeKey(generatedKey.Key, generatedKey.TypeKey, generatedKey.IsContainer);
-                    if (!activeGeneratedKeys.Contains(compositeKey))
-                    {
-                        DestroyImmediate(child.gameObject);
-                        continue;
-                    }
-                }
-
-                CleanupStaleGeneratedNodes(child, activeGeneratedKeys);
-            }
-        }
-
-        private string GetGameObjectHierarchyPathKey(GameObject go, Transform stopRoot)
-        {
-            if (go == null) return null;
-
-            var node = go.GetComponent<PsdLayerNode>();
-            if (node == null) return null;
-
-            var segments = new List<string>();
-            var current = go.transform;
-            while (current != null && current != stopRoot)
-            {
-                var currentNode = current.GetComponent<PsdLayerNode>();
-                if (currentNode != null)
-                {
-                    var segment = GetHierarchySegmentKey(currentNode);
-                    if (!string.IsNullOrEmpty(segment))
-                    {
-                        segments.Insert(0, segment);
-                    }
-                }
-                current = current.parent;
-            }
-            return segments.Count > 0 ? string.Join("/", segments) : null;
-        }
-
-        private string[] GetGameObjectHierarchyParentPath(GameObject go, Transform stopRoot, out string[] names)
-        {
-            names = null;
-            if (go == null || stopRoot == null) return null;
-            if (go.transform == stopRoot) return null;
-            if (go.transform.parent == null) return null;
-            if (!go.transform.IsChildOf(stopRoot)) return null;
-            if (go.transform.parent == stopRoot) return null;
-
-            var parents = new List<PsdLayerNode>();
-            var current = go.transform.parent;
-            while (current != null && current != stopRoot)
-            {
-                var currentNode = current.GetComponent<PsdLayerNode>();
-                if (currentNode != null)
-                {
-                    parents.Insert(0, currentNode);
-                }
-                current = current.parent;
-            }
-            if (parents.Count < 1) return null;
-
-            names = parents.Select(item => item.gameObject.name).ToArray();
-            return parents.Select(item => GetGameObjectHierarchyPathKey(item.gameObject, stopRoot)).ToArray();
-        }
-
-        private Dictionary<string, LayerUITypeSnapshot> CaptureLayerUITypeSnapshot()
-        {
-            var snapshots = new Dictionary<string, LayerUITypeSnapshot>(StringComparer.OrdinalIgnoreCase);
-            var nodes = GetComponentsInChildren<PsdLayerNode>(true);
-            foreach (var node in nodes)
-            {
-                var pathKey = GetLayerUITypePathKey(node);
-                if (string.IsNullOrEmpty(pathKey) || snapshots.ContainsKey(pathKey)) continue;
-
-                snapshots.Add(pathKey, new LayerUITypeSnapshot
-                {
-                    UIType = node.UIType
-                });
-            }
-            return snapshots;
-        }
-
-        private void RestoreLayerUITypeSnapshot(Dictionary<string, LayerUITypeSnapshot> snapshots)
-        {
-            if (snapshots == null || snapshots.Count < 1) return;
-
-            var nodes = GetComponentsInChildren<PsdLayerNode>(true);
-            foreach (var node in nodes)
-            {
-                var pathKey = GetLayerUITypePathKey(node);
-                if (string.IsNullOrEmpty(pathKey)) continue;
-                if (!snapshots.TryGetValue(pathKey, out var snapshot)) continue;
-
-                node.SetUIType(snapshot.UIType, false);
-            }
-        }
-
-        private string GetLayerUITypePathKey(PsdLayerNode node)
-        {
-            if (node == null) return null;
-
-            var segments = new List<string>();
-            var current = node.transform;
-            while (current != null && current != transform)
-            {
-                var currentNode = current.GetComponent<PsdLayerNode>();
-                if (currentNode != null)
-                {
-                    var segment = GetLayerUITypeSegmentKey(currentNode);
-                    if (!string.IsNullOrEmpty(segment))
-                    {
-                        segments.Insert(0, segment);
-                    }
-                }
-                current = current.parent;
-            }
-            return segments.Count > 0 ? string.Join("/", segments) : null;
-        }
-
-        private string GetLayerUITypeSegmentKey(PsdLayerNode node)
-        {
-            if (node == null) return null;
-
-            var baseKey = GetLayerUITypeLookupKey(node);
-            if (string.IsNullOrEmpty(baseKey)) return null;
-
-            int duplicateIndex = 0;
-            var parent = node.transform.parent;
-            if (parent != null)
-            {
-                for (int i = 0; i < parent.childCount; i++)
-                {
-                    var sibling = parent.GetChild(i);
-                    var siblingNode = sibling != null ? sibling.GetComponent<PsdLayerNode>() : null;
-                    if (siblingNode == null) continue;
-                    if (ReferenceEquals(siblingNode, node)) break;
-                    if (string.Equals(GetLayerUITypeLookupKey(siblingNode), baseKey, StringComparison.OrdinalIgnoreCase))
-                    {
-                        duplicateIndex++;
-                    }
-                }
-            }
-
-            return duplicateIndex > 0 ? $"{baseKey}[{duplicateIndex}]" : baseKey;
-        }
-
-        private string GetLayerUITypeLookupKey(PsdLayerNode node)
-        {
-            if (node == null) return null;
-
-            var rawName = string.IsNullOrWhiteSpace(node.SourceLayerName) ? node.gameObject?.name : node.SourceLayerName;
-            var parser = UGUIParser.Instance;
-            if (parser != null)
-            {
-                rawName = parser.RemoveLayerTypeFlags(rawName);
-            }
-            return PsdLayerNode.NormalizeLayerName(rawName, preserveRefTags: true);
-        }
-
-        private string GetHierarchySegmentKey(PsdLayerNode node)
-        {
-            if (node == null) return null;
-
-            var baseKey = node.LayerNameLookupKey;
-            if (string.IsNullOrEmpty(baseKey)) return null;
-
-            int duplicateIndex = 0;
-            var parent = node.transform.parent;
-            if (parent != null)
-            {
-                for (int i = 0; i < parent.childCount; i++)
-                {
-                    var sibling = parent.GetChild(i);
-                    var siblingNode = sibling != null ? sibling.GetComponent<PsdLayerNode>() : null;
-                    if (siblingNode == null) continue;
-                    if (ReferenceEquals(siblingNode, node)) break;
-                    if (string.Equals(siblingNode.LayerNameLookupKey, baseKey, StringComparison.OrdinalIgnoreCase))
-                    {
-                        duplicateIndex++;
-                    }
-                }
-            }
-
-            return duplicateIndex > 0 ? $"{baseKey}[{duplicateIndex}]" : baseKey;
-        }
-
-        private GameObject TryGetReusableGeneratedNode(Transform parent, UIHelperBase uiHelper, string pathKey)
-        {
-            if (parent == null || uiHelper == null || uiHelper.LayerNode == null || string.IsNullOrEmpty(pathKey)) return null;
-
-            string typeKey = uiHelper.LayerNode.UIType.ToString();
-            var reusableNode = FindGeneratedChild(parent, pathKey, typeKey, false);
-            if (reusableNode != null)
-            {
-                return reusableNode;
-            }
-
-            var conflictingNode = FindGeneratedChildByPath(parent, pathKey, false);
-            if (conflictingNode != null)
-            {
-                return conflictingNode;
-            }
-
-            var reusableContainer = FindGeneratedChild(parent, pathKey, GeneratedContainerTypeKey, true);
-            if (reusableContainer != null)
-            {
-                return reusableContainer;
-            }
-
-            return null;
-        }
-
-        private void PreserveGeneratedDependencyNodes(GameObject uiElement, UIHelperBase uiHelper, Transform pathRoot, HashSet<string> activeGeneratedKeys)
-        {
-            if (uiElement == null || uiHelper == null || pathRoot == null || activeGeneratedKeys == null) return;
-            if (!ShouldPreserveGeneratedDependencyNodes(uiHelper)) return;
-
-            var dependencies = uiHelper.GetDependencies();
-            if (dependencies == null || dependencies.Length < 1) return;
-
-            for (int i = 0; i < dependencies.Length; i++)
-            {
-                var dependency = dependencies[i];
-                if (dependency == null || !IsButtonTextDependency(dependency.UIType)) continue;
-
-                var dependencyPathKey = GetGameObjectHierarchyPathKey(dependency.gameObject, pathRoot);
-                var generatedDependency = FindGeneratedDescendantByPath(uiElement.transform, dependencyPathKey, false);
-                if (generatedDependency == null) continue;
-
-                SetGeneratedNodeKey(generatedDependency, dependencyPathKey, dependency.UIType.ToString(), false, activeGeneratedKeys);
-            }
-        }
-
-        private void RemoveConsumedGeneratedDependencyNodes(GameObject uiElement, UIHelperBase uiHelper, Transform pathRoot)
-        {
-            if (uiElement == null || uiHelper == null || pathRoot == null) return;
-            if (!ShouldRemoveConsumedDependencyNodes(uiHelper)) return;
-
-            var dependencies = uiHelper.GetDependencies();
-            if (dependencies == null || dependencies.Length < 1) return;
-
-            for (int i = 0; i < dependencies.Length; i++)
-            {
-                var dependency = dependencies[i];
-                if (dependency == null || !IsButtonImageDependency(dependency.UIType)) continue;
-
-                var dependencyPathKey = GetGameObjectHierarchyPathKey(dependency.gameObject, pathRoot);
-                var generatedDependency = FindGeneratedDescendantByPath(uiElement.transform, dependencyPathKey, false);
-                if (generatedDependency == null)
-                {
-                    generatedDependency = FindDescendantByName(uiElement.transform, dependency.GetGeneratedObjectName());
-                }
-                if (generatedDependency == null || generatedDependency == uiElement) continue;
-
-                DestroyImmediate(generatedDependency);
-            }
-        }
-
-        private static bool ShouldPreserveGeneratedDependencyNodes(UIHelperBase uiHelper)
-        {
-            return uiHelper is ButtonHelper || uiHelper is TMPButtonHelper;
-        }
-
-        private static bool ShouldRemoveConsumedDependencyNodes(UIHelperBase uiHelper)
-        {
-            return uiHelper is ButtonHelper || uiHelper is TMPButtonHelper;
-        }
-
-        private static bool IsButtonTextDependency(GUIType uiType)
-        {
-            return uiType == GUIType.Button_Text
-                || uiType == GUIType.Text
-                || uiType == GUIType.TMPText;
-        }
-
-        private static bool IsButtonImageDependency(GUIType uiType)
-        {
-            return uiType == GUIType.Background
-                || uiType == GUIType.Image
-                || uiType == GUIType.RawImage
-                || uiType == GUIType.Button_Highlight
-                || uiType == GUIType.Button_Press
-                || uiType == GUIType.Button_Select
-                || uiType == GUIType.Button_Disable;
-        }
-
-        private static GameObject FindGeneratedDescendantByPath(Transform root, string pathKey, bool isContainer)
-        {
-            if (root == null || string.IsNullOrEmpty(pathKey)) return null;
-
-            var generatedKeys = root.GetComponentsInChildren<PsdGeneratedKey>(true);
-            for (int i = 0; i < generatedKeys.Length; i++)
-            {
-                var key = generatedKeys[i];
-                if (key == null || key.IsContainer != isContainer) continue;
-                if (string.Equals(key.Key, pathKey, StringComparison.Ordinal))
-                {
-                    return key.gameObject;
-                }
-            }
-            return null;
-        }
-
-        private static GameObject FindDescendantByName(Transform root, string generatedName)
-        {
-            if (root == null || string.IsNullOrEmpty(generatedName)) return null;
-
-            for (int i = 0; i < root.childCount; i++)
-            {
-                var child = root.GetChild(i);
-                if (child == null) continue;
-
-                if (string.Equals(child.name, generatedName, StringComparison.Ordinal))
-                {
-                    return child.gameObject;
-                }
-
-                var nested = FindDescendantByName(child, generatedName);
-                if (nested != null)
-                {
-                    return nested;
-                }
-            }
-            return null;
-        }
-
-        private GameObject TryGetReusableGeneratedPrefabNode(Transform parent, PsdLayerNode prefabRefNode, string pathKey, GameObject prefabAsset)
-        {
-            if (parent == null || prefabRefNode == null || string.IsNullOrEmpty(pathKey)) return null;
-
-            var reusableNode = FindGeneratedChild(parent, pathKey, GeneratedPrefabReferenceTypeKey, false);
-            if (reusableNode != null)
-            {
-                var source = PrefabUtility.GetCorrespondingObjectFromSource(reusableNode);
-                if (source == prefabAsset)
-                {
-                    return reusableNode;
-                }
-                DestroyImmediate(reusableNode);
-            }
-
-            var conflictingNode = FindGeneratedChildByPath(parent, pathKey, false);
-            if (conflictingNode != null)
-            {
-                DestroyImmediate(conflictingNode);
-            }
-
-            var legacyName = string.IsNullOrEmpty(prefabRefNode.ReusePrefabKey)
-                ? prefabRefNode.gameObject.name
-                : PsdLayerNode.GetReferenceLeafName(prefabRefNode.ReusePrefabKey, prefabRefNode.gameObject.name);
-            var legacyNode = FindLegacyChildByName(parent, legacyName, false);
-            if (legacyNode == null) return null;
-
-            var legacySource = PrefabUtility.GetCorrespondingObjectFromSource(legacyNode);
-            return legacySource == prefabAsset ? legacyNode : null;
-        }
         private void ResolveLayerNameLookup(PsdLayerNode[] nodes = null)
         {
             layerLookupByName.Clear();
             referencedLayerKeys.Clear();
-            if (nodes == null || nodes.Length == 0)
-            {
-                nodes = this.GetComponentsInChildren<PsdLayerNode>(true);
-            }
+            originalResourceLayers.Clear();
+            declaredResourceLayers.Clear();
+            ambiguousResourceNames.Clear();
+            imageExportNames.Clear();
+            if (nodes == null) nodes = GetComponentsInChildren<PsdLayerNode>(true);
+            var exportNodes = new List<PsdLayerNode>();
+            var names = new List<string>();
             foreach (var node in nodes)
             {
-                var key = node.LayerNameLookupKey;
-                if (string.IsNullOrEmpty(key) || layerLookupByName.ContainsKey(key)) continue;
-                layerLookupByName.Add(key, node);
+                if (node.HasReuseReference) referencedLayerKeys.Add(node.ReuseTargetKey);
+                if (node.HasReuseReference || node.HasReusePrefabReference) continue;
+                string key = node.ResourceName;
+                if (layerLookupByName.ContainsKey(key)) layerLookupByName[key] = null;
+                else layerLookupByName.Add(key, node);
+                if (!node.NeedExportImage()) continue;
+                exportNodes.Add(node);
             }
-            foreach (var node in nodes)
+            // Source order is stable across save/reload, unlike Unity instance IDs.
+            exportNodes.Sort((a, b) => {
+                int order = a.RenderOrderSourceIndex.CompareTo(b.RenderOrderSourceIndex);
+                return order != 0 ? order : CompareHierarchyOrder(a, b);
+            });
+            foreach (var node in exportNodes) names.Add(node.ResourceName);
+            var allocated = PsdResourceNaming.AllocateNames(names);
+            for (int i = 0; i < allocated.Length; i++) imageExportNames.Add(exportNodes[i], allocated[i]);
+            var document = PsdInstance;
+            if (document != null) CollectResourceLayers(document.Childs);
+            resourceCatalogReady = true;
+        }
+
+        private void CollectResourceLayers(PsdLayer[] layers)
+        {
+            foreach (var layer in layers)
             {
-                if (!node.HasReuseReference || string.IsNullOrEmpty(node.ReuseTargetKey)) continue;
-                referencedLayerKeys.Add(node.ReuseTargetKey);
-                //if (!layerLookupByName.ContainsKey(node.ReuseTargetKey))
-                //{
-                //    Debug.LogWarning($"复用图层未找到: {node.name} -> {node.ReuseTargetDisplayName}");
-                //}
+                PsdResourceNaming.Parse(layer.Name, out var kind, out var key);
+                if (kind == "ref")
+                {
+                    if (!string.IsNullOrEmpty(key) && !declaredResourceLayers.ContainsKey(key)) declaredResourceLayers.Add(key, layer);
+                    continue;
+                }
+                if (kind == "refp") continue;
+                key = PsdResourceNaming.LayerName(layer.Name);
+                if (originalResourceLayers.ContainsKey(key)) ambiguousResourceNames.Add(key);
+                else originalResourceLayers.Add(key, layer);
+                if (layer.IsGroup) CollectResourceLayers(layer.Childs);
             }
         }
+
+        internal string ResolveImageExportName(PsdLayerNode node)
+        {
+            if (!imageExportNames.TryGetValue(node, out var name))
+            {
+                ResolveLayerNameLookup();
+                if (!imageExportNames.TryGetValue(node, out name)) name = node.ResourceName;
+            }
+            return name;
+        }
+
         private void ExportSharedReferenceSprites(PsdLayerNode[] nodes)
         {
             sharedSpriteAssets.Clear();
-            if (nodes == null || nodes.Length == 0) return;
-            if (!TryEnsureSharedOutputDirectory(out var sharedDir)) return;
-            var referencedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            exportedImagePathsThisRound.Clear();
+            ResolveLayerNameLookup(nodes);
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var node in nodes)
             {
-                if (!node.HasReuseReference || string.IsNullOrEmpty(node.ReuseTargetKey)) continue;
-                referencedKeys.Add(node.ReuseTargetKey);
-            }
-            foreach (var key in referencedKeys)
-            {
-                if (!layerLookupByName.TryGetValue(key, out var targetNode))
-                {
-                    continue;
-                }
-                var exportedPath = targetNode.ExportImageAsset(true, sharedDir, key, false, true);
-                if (!string.IsNullOrEmpty(exportedPath))
-                {
-                    RegisterSharedSprite(key, exportedPath);
-                }
+                if (!node.HasReuseReference || !visited.Add(node.ReuseTargetKey)) continue;
+                try { GetOrCreateSharedSprite(node, true); }
+                catch (Exception ex) { RecordGenerationIssue(node, "shared_image_failed", ex.Message); }
             }
         }
         private static bool EnsureAssetDirectoryExists(string assetPath)
@@ -3810,13 +4111,15 @@ namespace UGF.EditorTools.Psd2UGUI
                 return true;
             }
 
+            if (requester.IsAiAuthoritative) return false;
+
             if (!TryEnsureSharedPrefabOutputDirectory(out var sharedDir))
             {
                 Debug.LogWarning($"SharedPrefabOutput未配置, 无法复用prefab:{requester.name}");
                 return false;
             }
 
-            var expectedPrefabPath = Path.Combine(sharedDir, $"{key}.prefab").Replace("\\", "/");
+            var expectedPrefabPath = Path.Combine(sharedDir, key.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) ? key : key + ".prefab").Replace("\\", "/");
             if (!EnsureAssetDirectoryExists(expectedPrefabPath))
             {
                 return false;
@@ -3884,7 +4187,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     while (parent != null && parent != exportRoot)
                     {
                         var parentNode = parent.GetComponent<PsdLayerNode>();
-                        if (parentNode != null && parentNode.HasReusePrefabReference)
+                        if (parentNode != null && parentNode.HasReusePrefabReference && !parentNode.IsAiAuthoritative)
                         {
                             if (!ignoreRootPrefabReference || parentNode != rootLayerNode)
                             {
@@ -3908,20 +4211,13 @@ namespace UGF.EditorTools.Psd2UGUI
                 foreach (var prefabRef in prefabRefRoots)
                 {
                     if (prefabRef == null) continue;
-                    if (transform == prefabRef.transform || transform.IsChildOf(prefabRef.transform)) return true;
+                    if (transform == prefabRef.transform || !prefabRef.IsAiAuthoritative && transform.IsChildOf(prefabRef.transform)) return true;
                 }
                 return false;
             }
 
             var nodesForBuild = layerNodes.Where(node => node != null && !IsInsidePrefabRef(node.transform)).ToArray();
             NormalizePreferredUIHelpersForGeneration(nodesForBuild);
-            ResolveLayerNameLookup();
-            referencedLayerKeys.Clear();
-            foreach (var node in nodesForBuild)
-            {
-                if (!node.HasReuseReference || string.IsNullOrEmpty(node.ReuseTargetKey)) continue;
-                referencedLayerKeys.Add(node.ReuseTargetKey);
-            }
             ExportSharedReferenceSprites(nodesForBuild);
 
             var uiHelpers = GetAvailableUIHelpers(exportRoot);
@@ -3943,192 +4239,18 @@ namespace UGF.EditorTools.Psd2UGUI
                 return null;
             }
 
-            GameObject prefabRoot = null;
-            var existingPrefabAsset = AssetDatabase.LoadAssetAtPath<GameObject>(prefabAssetPath);
             var rootHelper = exportRoot.GetComponent<UIHelperBase>();
             bool useTargetAsPrefabRoot = rootHelper != null
                 && rootHelper.LayerNode != null
                 && rootHelper.LayerNode.IsMainUIType
                 && rootHelper.LayerNode.UIType != GUIType.Null;
-            try
-            {
-                if (existingPrefabAsset != null)
-                {
-                    prefabRoot = GameObject.Instantiate(existingPrefabAsset);
-                    RestoreGeneratedKeysFromMetadata(prefabAssetPath, prefabRoot);
-                }
 
-                Vector3 rootWorldOffset = Vector3.zero;
-                Quaternion rootLocalRotation = Quaternion.identity;
-                if (useTargetAsPrefabRoot)
-                {
-                    if (prefabRoot != null)
-                    {
-                        prefabRoot = rootHelper.CreateUI(prefabRoot);
-                    }
-                    if (prefabRoot == null)
-                    {
-                        prefabRoot = rootHelper.CreateUI();
-                    }
-                    if (prefabRoot == null)
-                    {
-                        useTargetAsPrefabRoot = false;
-                    }
-                }
-                if (!useTargetAsPrefabRoot)
-                {
-                    bool canReuseContainerRoot = prefabRoot != null
-                        && prefabRoot.GetComponent<RectTransform>() != null;
-                    if (!canReuseContainerRoot)
-                    {
-                        if (prefabRoot != null)
-                        {
-                            DestroyImmediate(prefabRoot);
-                        }
-                        prefabRoot = new GameObject(prefabRootName, typeof(RectTransform));
-                    }
-                    else
-                    {
-                        StripManagedGeneratedRootComponents(prefabRoot);
-                    }
-
-                    prefabRoot.name = prefabRootName;
-                    prefabRoot.layer = UnityEngine.LayerMask.NameToLayer("UI");
-                    prefabRoot.transform.localPosition = Vector3.zero;
-                    prefabRoot.transform.localRotation = Quaternion.identity;
-                    prefabRoot.transform.localScale = Vector3.one;
-                    UGUIParser.SetRectTransform(targetLogic, prefabRoot.transform);
-                }
-                else
-                {
-                    prefabRoot.name = prefabRootName;
-                    prefabRoot.layer = UnityEngine.LayerMask.NameToLayer("UI");
-                    rootWorldOffset = prefabRoot.transform.position;
-                    if (rootHelper.LayerNode.TryGetTextUnityRotation(out _))
-                    {
-                        rootLocalRotation = prefabRoot.transform.localRotation;
-                    }
-                    prefabRoot.transform.localPosition = Vector3.zero;
-                    prefabRoot.transform.localRotation = Quaternion.identity;
-                    prefabRoot.transform.localScale = Vector3.one;
-                }
-
-                var activeGeneratedKeys = new HashSet<string>(StringComparer.Ordinal);
-                int curIdx = 0;
-                int totalCount = uiHelpers.Length;
-                var generatedUiHelpers = new List<UIHelperBase>(totalCount);
-                var generatedUiElements = new List<GameObject>(totalCount);
-                foreach (var uiHelper in uiHelpers)
-                {
-                    if (uiHelper == null || uiHelper.LayerNode == null) continue;
-                    if (useTargetAsPrefabRoot && uiHelper == rootHelper) continue;
-
-                    EditorUtility.DisplayProgressBar($"生成prefab:({curIdx++}/{totalCount})", $"正在生成UI元素:{uiHelper.name}", curIdx / (float)totalCount);
-                    var elementPathKey = GetGameObjectHierarchyPathKey(uiHelper.gameObject, exportRoot);
-                    var goPath = GetGameObjectHierarchyParentPath(uiHelper.gameObject, exportRoot, out var goNames);
-                    var parentNode = GetOrCreateNodeByHierarchyPath(prefabRoot, goPath, goNames, activeGeneratedKeys);
-                    var reusableNode = TryGetReusableGeneratedNode(parentNode.transform, uiHelper, elementPathKey);
-                    var uiElement = uiHelper.CreateUI(reusableNode);
-                    if (uiElement == null) continue;
-
-                    SetGeneratedNodeKey(uiElement, elementPathKey, uiHelper.LayerNode.UIType.ToString(), false, activeGeneratedKeys);
-                    RemoveConsumedGeneratedDependencyNodes(uiElement, uiHelper, exportRoot);
-                    PreserveGeneratedDependencyNodes(uiElement, uiHelper, exportRoot, activeGeneratedKeys);
-                    uiElement.transform.SetParent(parentNode.transform, true);
-                    ApplyGeneratedSiblingIndex(uiElement.transform, uiHelper.transform);
-                    if (useTargetAsPrefabRoot)
-                    {
-                        uiElement.transform.position -= rootWorldOffset;
-                    }
-                    uiElement.transform.localScale = Vector3.one;
-                    uiHelper.OnUIParented(uiElement);
-                    generatedUiHelpers.Add(uiHelper);
-                    generatedUiElements.Add(uiElement);
-                }
-
-                if (prefabRefRoots.Count > 0)
-                {
-                    int prefabIdx = 0;
-                    int prefabTotal = prefabRefRoots.Count;
-                    foreach (var prefabRefNode in prefabRefRoots)
-                    {
-                        if (prefabRefNode == null || !prefabRefNode.HasReusePrefabReference) continue;
-
-                        EditorUtility.DisplayProgressBar($"生成prefab-引用prefab:({prefabIdx++}/{prefabTotal})", $"正在实例化prefab:{prefabRefNode.ReusePrefabDisplayName}", prefabIdx / (float)prefabTotal);
-                        if (!TryGetOrCreateSharedPrefabAsset(prefabRefNode, out var prefabAsset) || prefabAsset == null)
-                        {
-                            Debug.LogWarning($"引用prefab未找到且导出失败: {prefabRefNode.ReusePrefabDisplayName}");
-                            continue;
-                        }
-
-                        var pathKey = GetGameObjectHierarchyPathKey(prefabRefNode.gameObject, exportRoot);
-                        var goPath = GetGameObjectHierarchyParentPath(prefabRefNode.gameObject, exportRoot, out var goNames);
-                        var parentNode = GetOrCreateNodeByHierarchyPath(prefabRoot, goPath, goNames, activeGeneratedKeys);
-                        var prefabInstance = TryGetReusableGeneratedPrefabNode(parentNode.transform, prefabRefNode, pathKey, prefabAsset);
-                        if (prefabInstance == null)
-                        {
-                            prefabInstance = PrefabUtility.InstantiatePrefab(prefabAsset) as GameObject;
-                            if (prefabInstance == null)
-                            {
-                                prefabInstance = GameObject.Instantiate(prefabAsset);
-                            }
-                        }
-                        prefabInstance.name = string.IsNullOrEmpty(prefabRefNode.ReusePrefabKey)
-                            ? prefabAsset.name
-                            : PsdLayerNode.GetReferenceLeafName(prefabRefNode.ReusePrefabKey, prefabAsset.name);
-                        prefabInstance.transform.localRotation = Quaternion.identity;
-                        prefabInstance.transform.localScale = Vector3.one;
-                        var prefabRect = prefabInstance.GetComponent<RectTransform>();
-                        if (prefabRect != null)
-                        {
-                            UGUIParser.SetRectTransform(prefabRefNode, prefabRect);
-                        }
-                        else
-                        {
-                            Debug.LogWarning($"引用prefab缺少RectTransform: {prefabAsset.name}");
-                        }
-
-                        SetGeneratedNodeKey(prefabInstance, pathKey, GeneratedPrefabReferenceTypeKey, false, activeGeneratedKeys);
-                        prefabInstance.transform.SetParent(parentNode.transform, true);
-                        ApplyGeneratedSiblingIndex(prefabInstance.transform, prefabRefNode.transform);
-                        if (useTargetAsPrefabRoot)
-                        {
-                            prefabInstance.transform.position -= rootWorldOffset;
-                        }
-                        prefabInstance.transform.localScale = Vector3.one;
-                    }
-                }
-
-                SynchronizeGeneratedGroupOpacities(exportRoot, prefabRoot, nodesForBuild);
-                NotifyGeneratedHierarchyReady(generatedUiHelpers, generatedUiElements);
-                CleanupLegacyUiStringKeys(prefabRoot);
-                CleanupStaleGeneratedNodes(prefabRoot.transform, activeGeneratedKeys);
-                if (useTargetAsPrefabRoot)
-                {
-                    // A root Text/TMP prefab owns its RectTransform, so its
-                    // rotation must survive the root-normalization step above.
-                    prefabRoot.transform.localRotation = rootLocalRotation;
-                }
-                FitGeneratedContainerHierarchy(prefabRoot.transform);
-                var generatedNodeSnapshots = CaptureGeneratedNodeSnapshots(prefabRoot);
-                CleanupTransientGeneratedKeys(prefabRoot);
-
-                prefabRoot.name = System.IO.Path.GetFileNameWithoutExtension(prefabAssetPath);
-                var uiPrefab = PrefabUtility.SaveAsPrefabAsset(prefabRoot, prefabAssetPath);
-                if (uiPrefab != null)
-                {
-                    SaveGeneratedKeysMetadata(prefabAssetPath, uiPrefab, generatedNodeSnapshots);
-                }
-                return uiPrefab;
-            }
-            finally
-            {
-                EditorUtility.ClearProgressBar();
-                if (prefabRoot != null)
-                {
-                    DestroyImmediate(prefabRoot);
-                }
-            }
+            return RunPrefabGeneration(
+                exportRoot, rootLayerNode, nodesForBuild, uiHelpers, prefabRefRoots,
+                rootHelper: useTargetAsPrefabRoot ? rootHelper : null,
+                prefabAssetPath: prefabAssetPath,
+                prefabRootName: prefabRootName,
+                isFullFormExport: false);
         }
 
         private static void StripManagedGeneratedRootComponents(GameObject target)
@@ -4142,7 +4264,9 @@ namespace UGF.EditorTools.Psd2UGUI
                 if (component == null) continue;
 
                 var type = component.GetType();
-                if (IsIgnoredRootComponent(type)) continue;
+                if (type == typeof(Transform)
+                    || type == typeof(RectTransform)
+                    || type == typeof(CanvasRenderer)) continue;
                 if (!IsManagedGeneratedRootComponent(type)) continue;
 
                 DestroyImmediate(component);
@@ -4159,64 +4283,91 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         internal string GetOrCreateSharedSprite(PsdLayerNode requester, bool auto9Slice)
         {
-            if (requester == null || string.IsNullOrEmpty(requester.ReuseTargetKey))
+            string key = requester.ReuseTargetKey;
+            if (string.IsNullOrEmpty(key)) return null;
+            if (!resourceCatalogReady) ResolveLayerNameLookup();
+            if (TryGetSharedSpritePath(requester, out var cachedPath)) return cachedPath;
+            if (!TryEnsureSharedOutputDirectory(out var sharedDir)) return null;
+            var registry = PsdResourceRegistry.Open(sharedDir);
+            string existing = registry.Resolve(sharedDir, key, false);
+            var resource = registry.Find(key, false);
+            if (existing != null && (resource.ownerDocument != Document.documentId || imageUpdateScope != null))
             {
-                return null;
+                if (imageUpdateScope != null && resource.ownerDocument == Document.documentId)
+                    RecordGenerationIssue(requester, "shared_resource_not_updated", "局部更新保留共享资源。请完整生成拥有此资源的 PSD 以同步所有引用: " + key);
+                RegisterSharedSprite(key, existing);
+                return existing;
             }
-
-            if (TryGetSharedSpritePath(requester, out var cachedPath))
+            // An explicit local filename identifies that asset. Never write PNG bytes under
+            // another format's extension or silently resolve a different resource.
+            if (Array.Exists(PsdResourceNaming.ImageExtensions, extension => key.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+                && !key.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+                throw new FileNotFoundException("引用图片不存在: " + key);
+            if (ambiguousResourceNames.Contains(key))
+                throw new InvalidOperationException("PSD 中有多个同名资源，无法确定引用目标: " + key);
+            if (!originalResourceLayers.TryGetValue(key, out var source)) declaredResourceLayers.TryGetValue(key, out source);
+            if (resource != null && resource.sourceLayerId > 0)
             {
-                return cachedPath.Replace("\\", "/");
-            }
-            if (!TryEnsureSharedOutputDirectory(out var sharedDir))
-            {
-                Debug.LogWarning($"SharedAssetsOutput未配置, 无法复用图层:{requester.name}");
-                return null;
-            }
-            bool preferHighBitDepthAsset = requester.PreferHighBitDepthAsset;
-            var sharedAssetPath = PsdLayerNode.ResolveExportedImageAssetPath(sharedDir, requester.ReuseTargetKey, preferHighBitDepthAsset);
-            if (!string.IsNullOrWhiteSpace(sharedAssetPath))
-            {
-                RegisterSharedSprite(requester.ReuseTargetKey, sharedAssetPath);
-                return sharedAssetPath;
-            }
-
-            ResolveLayerNameLookup();
-            if (!layerLookupByName.TryGetValue(requester.ReuseTargetKey, out var targetNode) || targetNode == null)
-            {
-                var exportedPath = requester.ExportImageAsset(true, sharedDir, requester.ReuseTargetKey, false, auto9Slice, ignoreReference: true);
-                if (!string.IsNullOrEmpty(exportedPath))
+                source = null;
+                foreach (var candidate in originalResourceLayers.Values)
+                    if (candidate.TryGetLayerId(out int id) && id == resource.sourceLayerId) { source = candidate; break; }
+                if (source == null)
+                    foreach (var candidate in declaredResourceLayers.Values)
+                        if (candidate.TryGetLayerId(out int id) && id == resource.sourceLayerId) { source = candidate; break; }
+                if (source == null)
                 {
-                    RegisterSharedSprite(requester.ReuseTargetKey, exportedPath);
-                    return exportedPath;
+                    RecordGenerationIssue(requester, "shared_source_missing", "共享图片的原始图层已移除，保留已生成的资源: " + key);
+                    RegisterSharedSprite(key, existing);
+                    return existing;
                 }
-                Debug.LogWarning($"引用图片未找到且导出失败: {requester.name} -> {requester.ReuseTargetDisplayName}");
-                return null;
+            }
+            string exportedPath;
+            string contentHash = null;
+            int sourceLayerId = 0;
+            if (source != null)
+            {
+                var tree = AiSourceRenderTree.Build(source.Document, new HashSet<PsdLayer> { source });
+                var rendered = PsdLayerRenderer.RenderTree(tree, includeHiddenLayers: true, isPreviewRender: false);
+                if (rendered == null || rendered.IsEmpty) return null;
+                var bytes = PsdTextureAssetUtility.EncodePng(rendered);
+                contentHash = ImageHash(bytes);
+                source.TryGetLayerId(out sourceLayerId);
+                if (existing != null && resource.contentHash == contentHash)
+                {
+                    RegisterSharedSprite(key, existing);
+                    return existing;
+                }
+                exportedPath = existing ?? sharedDir.TrimEnd('/') + "/" + key + (key.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? "" : ".png");
+                if (!EnsureAssetDirectoryExists(exportedPath)) return null;
+                File.WriteAllBytes(exportedPath, bytes);
+                if (Psd2UIFormSettings.Instance.CompressImage) CompressImageFile(exportedPath);
+                AssetDatabase.ImportAsset(exportedPath);
+                ConvertTexturesType(new[] { exportedPath }, true, rendered.IsHighBitDepth);
+                if (auto9Slice) ApplySpriteNineSlice(exportedPath);
             }
             else
             {
-                var exportedPath = targetNode.ExportImageAsset(true, sharedDir, requester.ReuseTargetKey, false, auto9Slice);
-                if (!string.IsNullOrEmpty(exportedPath))
-                {
-                    RegisterSharedSprite(requester.ReuseTargetKey, exportedPath);
-                    return exportedPath;
-                }
+                // A ref marker is an explicit shared-resource declaration. With no existing asset,
+                // export one canonical occurrence, even when every occurrence carries the marker.
+                var target = layerLookupByName.TryGetValue(key, out var named) && named != null ? named : requester;
+                exportedPath = target.ExportImageAsset(true, sharedDir, key, false, auto9Slice, ignoreReference: true);
             }
-            return null;
+            if (!string.IsNullOrEmpty(exportedPath))
+            {
+                registry.Bind(key, false, exportedPath, Document.documentId, sourceLayerId, contentHash);
+                RegisterSharedSprite(key, exportedPath);
+            }
+            return exportedPath;
         }
         internal bool TryGetSharedSpritePath(PsdLayerNode node, out string assetPath)
         {
             assetPath = null;
             if (node == null) return false;
-            var key = node.LayerNameLookupKey;
-            if (string.IsNullOrEmpty(key)) return false;
+            string key = node.HasReuseReference ? node.ReuseTargetKey : node.ResourceName;
+            if (!node.HasReuseReference && (!referencedLayerKeys.Contains(key)
+                || !layerLookupByName.TryGetValue(key, out var owner) || owner != node)) return false;
             if (sharedSpriteAssets.TryGetValue(key, out var cachedPath))
             {
-                if (!PsdTextureAssetUtility.MatchesExportMode(cachedPath, node.PreferHighBitDepthAsset))
-                {
-                    sharedSpriteAssets.Remove(key);
-                    return false;
-                }
                 if (File.Exists(cachedPath))
                 {
                     assetPath = cachedPath.Replace("\\", "/");
@@ -4230,10 +4381,13 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             exportDir = null;
             fileName = null;
-            ResolveLayerNameLookup();
             if (node == null) return false;
-            var key = node.LayerNameLookupKey;
-            if (string.IsNullOrEmpty(key) || !referencedLayerKeys.Contains(key)) return false;
+            // 键与 referencedLayerKeys 的写入侧(ReuseTargetKey)保持一致,否则引用节点必判空
+            var key = node.HasReuseReference && !string.IsNullOrWhiteSpace(node.ReuseTargetKey)
+                ? node.ReuseTargetKey
+                : node.LayerNameLookupKey;
+            if (string.IsNullOrEmpty(key) || !referencedLayerKeys.Contains(key)
+                || !layerLookupByName.TryGetValue(key, out var owner) || owner != node) return false;
             if (!TryEnsureSharedOutputDirectory(out var sharedDir)) return false;
             exportDir = sharedDir;
             fileName = key;
@@ -4243,6 +4397,7 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(assetPath)) return;
             sharedSpriteAssets[key] = assetPath.Replace("\\", "/");
+            RegisterExportedImagePath(assetPath);
         }
         internal PsdLayerNode FindLayerNodeByKey(string key)
         {
@@ -4255,6 +4410,7 @@ namespace UGF.EditorTools.Psd2UGUI
         private void FitGeneratedContainerHierarchy(Transform root)
         {
             if (root == null) return;
+            if (IsGeneratedOrphansRoot(root)) return;
 
             for (int i = 0; i < root.childCount; i++)
             {
@@ -4272,11 +4428,8 @@ namespace UGF.EditorTools.Psd2UGUI
         private static bool IsGeneratedContainer(Transform target)
         {
             if (target == null) return false;
-
-            var generatedKey = target.GetComponent<PsdGeneratedKey>();
-            return generatedKey != null
-                && generatedKey.IsContainer
-                && string.Equals(generatedKey.TypeKey, GeneratedContainerTypeKey, StringComparison.Ordinal);
+            var context = GenerationContext.Current;
+            return context != null && context.GeneratedContainerNodes.Contains(target.gameObject);
         }
 
         private static void FitGeneratedContainerToDirectChildren(RectTransform container)
@@ -4380,6 +4533,9 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             worldRect = default;
             if (rectTransform == null) return false;
+            // Match source bounds: unresolved/empty children must not enlarge generated containers.
+            var localRect = rectTransform.rect;
+            if (localRect.width <= 0f || localRect.height <= 0f) return false;
 
             var corners = new Vector3[4];
             rectTransform.GetWorldCorners(corners);
@@ -4423,7 +4579,8 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 if (uiHelpers[i] != null)
                 {
-                    uiHelpers[i].ParseAndAttachUIElements();
+                    try { uiHelpers[i].ParseAndAttachUIElements(); }
+                    catch (Exception ex) { failedGenerationHelpers.Add(uiHelpers[i]); RecordGenerationIssue(uiHelpers[i].LayerNode, "helper_parse_failed", ex.Message); }
                 }
             }
             uiHelpers = root.GetComponentsInChildren<UIHelperBase>();
@@ -4441,7 +4598,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             var dependInstIds = new HashSet<
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
                 EntityId
 #else
                 int
@@ -4451,7 +4608,10 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 if (item == null) continue;
 
-                var dependencies = item.GetDependencies();
+                if (failedGenerationHelpers.Contains(item)) continue;
+                PsdLayerNode[] dependencies;
+                try { dependencies = item.GetDependencies(); }
+                catch (Exception ex) { failedGenerationHelpers.Add(item); RecordGenerationIssue(item.LayerNode, "helper_dependencies_failed", ex.Message); continue; }
                 if (dependencies == null) continue;
 
                 foreach (var depend in dependencies)
@@ -4487,6 +4647,8 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private void NormalizePreferredUIHelpersForGeneration(PsdLayerNode[] layerNodes)
         {
+            failedGenerationHelpers.Clear();
+            pendingGenerationIssues.Clear();
             var parser = UGUIParser.Instance;
             if (parser == null || layerNodes == null || layerNodes.Length == 0) return;
 
@@ -4495,7 +4657,8 @@ namespace UGF.EditorTools.Psd2UGUI
                 var node = layerNodes[i];
                 if (node == null) continue;
 
-                var preferredType = parser.ResolvePreferredUIType(node.UIType);
+                if (node.IsAiAuthoritative) continue;
+                var preferredType = node.ResolvePreferredType(node.UIType);
                 if (preferredType == node.UIType) continue;
 
                 node.SetUIType(preferredType, false);
@@ -4507,35 +4670,48 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 var node = layerNodes[i];
                 if (node == null) continue;
-                node.RefreshUIHelper(false);
+                try { node.RefreshUIHelper(false); }
+                catch (Exception ex)
+                {
+                    var helper = node.GetComponent<UIHelperBase>();
+                    if (helper != null) failedGenerationHelpers.Add(helper);
+                    RecordGenerationIssue(node, "helper_refresh_failed", ex.Message);
+                }
             }
         }
 
-        private static void ResolveDependencyClaims(UIHelperBase[] uiHelpers)
+        private void ResolveDependencyClaims(UIHelperBase[] uiHelpers)
         {
             if (uiHelpers == null || uiHelpers.Length < 1) return;
 
-            var dependencyOwnerIds = new Dictionary<int, HashSet<int>>();
+            var dependencyOwnerIds = new Dictionary<PsdObjectId, HashSet<PsdObjectId>>();
             for (int i = 0; i < uiHelpers.Length; i++)
             {
                 var uiHelper = uiHelpers[i];
                 if (uiHelper == null) continue;
 
-                var dependencies = uiHelper.GetDependencies();
+                if (failedGenerationHelpers.Contains(uiHelper)) continue;
+                PsdLayerNode[] dependencies;
+                try { dependencies = uiHelper.GetDependencies(); }
+                catch (Exception ex) { failedGenerationHelpers.Add(uiHelper); RecordGenerationIssue(uiHelper.LayerNode, "helper_dependencies_failed", ex.Message); continue; }
                 if (dependencies == null) continue;
 
+#if UNITY_6000_3_OR_NEWER
+                var ownerId = uiHelper.GetEntityId();
+#else
                 int ownerId = uiHelper.GetInstanceID();
+#endif
                 for (int j = 0; j < dependencies.Length; j++)
                 {
                     var dependency = dependencies[j];
                     if (dependency == null) continue;
 
-                    int dependencyId = UIHelperBase.GetDependencyClaimId(dependency);
-                    if (dependencyId == 0) continue;
+                    var dependencyId = UIHelperBase.GetDependencyClaimId(dependency);
+                    if (dependencyId == default(PsdObjectId)) continue;
 
                     if (!dependencyOwnerIds.TryGetValue(dependencyId, out var ownerIds))
                     {
-                        ownerIds = new HashSet<int>();
+                        ownerIds = new HashSet<PsdObjectId>();
                         dependencyOwnerIds.Add(dependencyId, ownerIds);
                     }
                     ownerIds.Add(ownerId);
@@ -4544,7 +4720,10 @@ namespace UGF.EditorTools.Psd2UGUI
 
             for (int i = 0; i < uiHelpers.Length; i++)
             {
-                uiHelpers[i]?.ResolveDependencyClaims(dependencyOwnerIds);
+                var helper = uiHelpers[i];
+                if (helper == null || failedGenerationHelpers.Contains(helper)) continue;
+                try { helper.ResolveDependencyClaims(dependencyOwnerIds); }
+                catch (Exception ex) { failedGenerationHelpers.Add(helper); RecordGenerationIssue(helper.LayerNode, "helper_claims_failed", ex.Message); }
             }
         }
 
@@ -4620,6 +4799,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     texImporter.alphaSource = TextureImporterAlphaSource.FromInput;
                     texImporter.alphaIsTransparency = true;
                     texImporter.mipmapEnabled = false;
+                    texImporter.npotScale = TextureImporterNPOTScale.None;
                 }
                 else
                 {
@@ -4630,6 +4810,9 @@ namespace UGF.EditorTools.Psd2UGUI
                     texImporter.mipmapEnabled = false;
                     texImporter.npotScale = TextureImporterNPOTScale.None;
                 }
+
+                // 默认 maxTextureSize=2048 会把超过它的图层降采样，尺寸与九宫边框都跟 PSD 对不上。
+                texImporter.maxTextureSize = Math.Max(texImporter.maxTextureSize, 16384);
 
                 texImporter.sRGBTexture = true;
                 texImporter.textureCompression = TextureImporterCompression.Uncompressed;
@@ -4712,7 +4895,22 @@ namespace UGF.EditorTools.Psd2UGUI
         /// <returns></returns>
         internal string GetUIFormImagesOutputDir()
         {
-            return Path.Combine(Psd2UIFormSettings.Instance.UIImagesOutputDir, uiFormName);
+            // 这里必须走 NormalizeAssetDirectory：图片写到 Assets 之外时 Unity 根本不导入，
+            // 结果是整屏白图却没有一句错误。
+            var imagesRoot = Psd2UIFormSettings.Instance.UIImagesOutputDir;
+            if (string.IsNullOrWhiteSpace(imagesRoot))
+            {
+                Debug.LogError("图片输出目录未配置：Settings 里的 UIImagesOutputDir 为空。");
+                return null;
+            }
+
+            string formName = uiFormName ?? string.Empty;
+            string combined = imagesRoot.TrimEnd('/', '\\');
+            if (!string.IsNullOrEmpty(formName)) combined += "/" + formName;
+            string normalized = NormalizeAssetDirectory(combined);
+            if (normalized == null)
+                Debug.LogError($"图片输出目录必须位于工程 Assets 内，否则 Unity 不会导入这些贴图: {combined}");
+            return normalized;
         }
 
     }
@@ -4720,12 +4918,17 @@ namespace UGF.EditorTools.Psd2UGUI
     {
         internal static string GetRelativePath(string relativeTo, string path)
         {
-#if UNITY_2021_1_OR_NEWER
+#if UNITY_2021_2_OR_NEWER
             return Path.GetRelativePath(relativeTo, path);
 #else
             relativeTo = Path.GetFullPath(relativeTo.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
                                             .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar);
             path = Path.GetFullPath(path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar));
+            if (string.Equals(relativeTo.TrimEnd(Path.DirectorySeparatorChar), path.TrimEnd(Path.DirectorySeparatorChar),
+                Application.platform == RuntimePlatform.WindowsEditor ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            {
+                return ".";
+            }
             Uri fromUri = new Uri(Path.GetFullPath(relativeTo));
             Uri toUri = new Uri(Path.GetFullPath(path));
 
@@ -4735,6 +4938,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             Uri relativeUri = fromUri.MakeRelativeUri(toUri);
+            if (relativeUri.IsAbsoluteUri) return path;
             string relativePath = Uri.UnescapeDataString(relativeUri.ToString());
 
             return relativePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
@@ -4743,8 +4947,3 @@ namespace UGF.EditorTools.Psd2UGUI
     }
 }
 #endif
-
-
-
-
-

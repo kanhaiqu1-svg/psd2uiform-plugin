@@ -52,16 +52,22 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (LayerNode.LayerType == PsdLayerType.LayerGroup)
             {
-            background = FindOwnedNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
-            text = FindOwnedNode(GUIType.Button_Text, GUIType.Text);
-            highlight = FindOwnedNode(GUIType.Button_Highlight);
-            press = FindOwnedNode(GUIType.Button_Press);
-            select = FindOwnedNode(GUIType.Button_Select);
-            disable = FindOwnedNode(GUIType.Button_Disable);
+                background = FindOwnedNode(GUIType.Background, GUIType.Image, GUIType.RawImage);
+                text = FindOwnedNode(GUIType.Button_Text, GUIType.Text);
+                highlight = FindOwnedNode(GUIType.Button_Highlight);
+                press = FindOwnedNode(GUIType.Button_Press);
+                select = FindOwnedNode(GUIType.Button_Select);
+                disable = FindOwnedNode(GUIType.Button_Disable);
             }
             else
             {
-                background = LayerNode;
+                bool isText = LayerNode.LayerType == PsdLayerType.TextLayer;
+                background = isText ? null : LayerNode;
+                text = isText ? LayerNode : null;
+                highlight = null;
+                press = null;
+                select = null;
+                disable = null;
             }
         }
 
@@ -70,19 +76,21 @@ namespace UGF.EditorTools.Psd2UGUI
             var button = uiRoot.GetComponent<Button>();
             var btImg = button.GetComponent<Image>();
             var rectSource = background != null ? background : LayerNode;
-            UGUIParser.Instance.BindImage(background, btImg);
+            BindOptionalControlImage(background, btImg);
             UGUIParser.SetRectTransform(rectSource, button);
             var btText = FindTemplateText(uiRoot);
             if (text == null)
             {
                 if (btText != null)
                 {
-                    DestroyImmediate(btText.gameObject);
+                    // 无文本图层:删除模板文本节点,保证 UI 纯净、无冗余节点
+                    RetireGeneratedObject(btText.gameObject);
                 }
             }
             else
             {
                 btText = btText ?? CreateTemplateText(uiRoot);
+                if (btText != null) btText.gameObject.SetActive(true);
                 UGUIParser.SetTextStyle(text, btText);
                 UGUIParser.SetTextRectTransform(text, btText);
                 UGUIParser.SetTextRotation(text, btText);
@@ -121,7 +129,7 @@ namespace UGF.EditorTools.Psd2UGUI
             for (int i = 0; i < root.childCount; i++)
             {
                 var child = root.GetChild(i);
-                if (child == null || child.GetComponent<PsdGeneratedKey>() != null) continue;
+                if (child == null) continue;
 
                 var text = child.GetComponent<Text>();
                 if (text != null) return text;

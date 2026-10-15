@@ -1,7 +1,10 @@
 fileFormatVersion: 2
 guid: 987baf00f7f168348b38e19e2af5bb3a
 TextureImporter:
-  internalIDToNameTable: []
+  internalIDToNameTable:
+  - first:
+      213: 973892945948697416
+    second: Psd2UguiForm_0
   externalObjects: {}
   serializedVersion: 13
   mipmaps:
@@ -160,7 +163,28 @@ TextureImporter:
     forceMaximumCompressionQuality_BC6H_BC7: 0
   spriteSheet:
     serializedVersion: 2
-    sprites: []
+    sprites:
+    - serializedVersion: 2
+      name: Psd2UguiForm_0
+      rect:
+        serializedVersion: 2
+        x: 0
+        y: 0
+        width: 750
+        height: 1334
+      alignment: 0
+      pivot: {x: 0, y: 0}
+      border: {x: 0, y: 0, z: 0, w: 0}
+      outline: []
+      physicsShape: []
+      tessellationDetail: -1
+      bones: []
+      spriteID: 843e7847976f38d00800000000000000
+      internalID: 973892945948697416
+      vertices: []
+      indices: 
+      edges: []
+      weights: []
     outline: []
     physicsShape: []
     bones: []
@@ -171,7 +195,8 @@ TextureImporter:
     edges: []
     weights: []
     secondaryTextures: []
-    nameFileIdTable: {}
+    nameFileIdTable:
+      Psd2UguiForm_0: 973892945948697416
   mipmapLimitGroupName: 
   pSDRemoveMatte: 0
   userData: 

@@ -21,13 +21,7 @@ namespace UGF.EditorTools.Psd2UGUI
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     internal static class PsdReaderMenuItems
     {
-        [MenuItem(PsdReaderMenuActions.ForceResetMenuPath)]
-        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
-        private static void ForceReset()
-        {
-            PsdReaderMenuActions.ForceReset();
-        }
-
+#if !EFUN_PRIVATE
         [MenuItem(PsdReaderMenuActions.LicenseWindowMenuPath, priority = PsdReaderMenuActions.LicenseWindowPriority)]
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         private static void OpenLicenseWindow()
@@ -41,6 +35,7 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             PsdReaderMenuActions.ClearLicense();
         }
+#endif
 
         [MenuItem(PsdReaderMenuActions.CheckUpdateMenuPath, priority = PsdReaderMenuActions.CheckUpdatePriority)]
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]

@@ -129,7 +129,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 Arguments = $"-NoLogo -ExecutionPolicy Bypass -Command \"{command}\"",
                 UseShellExecute = true,
                 CreateNoWindow = false,
-                WorkingDirectory = Directory.GetParent(Application.dataPath).FullName
+                WorkingDirectory = context.JobDirectory
             };
             var process = Process.Start(startInfo);
             AiJobFileUtility.AppendDebugLog(context, "Launched visible Windows debug console for CLI output.");

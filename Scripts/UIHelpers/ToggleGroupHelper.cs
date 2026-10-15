@@ -22,6 +22,11 @@ https://shop106471535.taobao.com
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+#if UNITY_6000_3_OR_NEWER
+using PsdObjectId = UnityEngine.EntityId;
+#else
+using PsdObjectId = System.Int32;
+#endif
 using UnityEngine.UI;
 
 namespace UGF.EditorTools.Psd2UGUI
@@ -32,6 +37,8 @@ namespace UGF.EditorTools.Psd2UGUI
     {
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [SerializeField] private PsdLayerNode background = null;
+        // 依赖裁决释放标记:让出所有权后,RefreshBackgroundReference 不得再自动找回背景节点
+        private bool backgroundClaimReleased = false;
 
         internal override PsdLayerNode[] GetDependencies()
         {
@@ -39,20 +46,22 @@ namespace UGF.EditorTools.Psd2UGUI
             return CalculateDependencies(background);
         }
 
-        internal override void ResolveDependencyClaims(Dictionary<int, HashSet<int>> dependencyOwnerIds)
+        internal override void ResolveDependencyClaims(Dictionary<PsdObjectId, HashSet<PsdObjectId>> dependencyOwnerIds)
         {
             if (IsDependencyClaimedByOtherHelper(background, dependencyOwnerIds))
             {
                 background = null;
+                backgroundClaimReleased = true;
             }
         }
 
         internal override void ParseAndAttachUIElements()
         {
+            backgroundClaimReleased = false;
             RefreshBackgroundReference();
         }
 
-        protected override GameObject CreateOrReuseRoot(GameObject uiInstance)
+        protected override GameObject CreateOrReuseRoot(GameObject uiInstance, bool forceRebuild)
         {
             return background != null
                 ? CreateOrReuseImageRoot(uiInstance)
@@ -64,21 +73,24 @@ namespace UGF.EditorTools.Psd2UGUI
             if (background != null)
             {
                 var image = uiRoot.GetComponent<Image>() ?? uiRoot.AddComponent<Image>();
-                UGUIParser.SetRectTransform(LayerNode, image);
-                UGUIParser.Instance.BindImage(background, image);
+                image.enabled = true;
+                var canvasRenderer = uiRoot.GetComponent<CanvasRenderer>();
+                if (canvasRenderer != null) canvasRenderer.cull = false;
+                UGUIParser.SetRectTransform(background, image);
+                BindOptionalControlImage(background, image);
             }
             else
             {
                 var image = uiRoot.GetComponent<Image>();
                 if (image != null)
                 {
-                    DestroyImmediate(image);
+                    RetireGeneratedObject(image);
                 }
 
                 var canvasRenderer = uiRoot.GetComponent<CanvasRenderer>();
                 if (canvasRenderer != null)
                 {
-                    DestroyImmediate(canvasRenderer);
+                    RetireGeneratedObject(canvasRenderer);
                 }
 
                 UGUIParser.SetRectTransform(LayerNode, uiRoot.transform);
@@ -92,8 +104,10 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private void RefreshBackgroundReference()
         {
+            if (backgroundClaimReleased) return;//已裁决让出所有权,不再自动找回
+
             background = LayerNode != null && LayerNode.LayerType == PsdLayerType.LayerGroup
-                ? FindOwnedNode(GUIType.Background)
+                ? LayerNode.FindOwnedContainerBackground()
                 : null;
         }
 
@@ -150,8 +164,6 @@ namespace UGF.EditorTools.Psd2UGUI
                 var type = component.GetType();
                 if (type == typeof(Transform)
                     || type == typeof(RectTransform)
-                    || type == typeof(UIStringKey)
-                    || type == typeof(PsdGeneratedKey)
                     || type == typeof(ToggleGroup))
                 {
                     continue;
@@ -164,7 +176,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
                 if (IsManagedGeneratedRootComponent(type))
                 {
-                    DestroyImmediate(component);
+                    RetireGeneratedObject(component);
                 }
             }
         }

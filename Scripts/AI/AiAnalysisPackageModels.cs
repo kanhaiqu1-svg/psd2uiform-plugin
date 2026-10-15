@@ -25,7 +25,6 @@ namespace UGF.EditorTools.Psd2UGUI
         public string version;
         public string treeHash;
         public AiAnalysisDocumentInfo document;
-        public AiAnalysisConfigInfo config;
         public List<AiAnalysisNodeEntry> nodes = new List<AiAnalysisNodeEntry>();
     }
 
@@ -33,33 +32,19 @@ namespace UGF.EditorTools.Psd2UGUI
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     internal sealed class AiAnalysisDocumentInfo
     {
+        public string sourceHash;
+        public string imageRoot;
         public string previewImagePath;
         public string annotatedPreviewImagePath;
-        public string nodePreviewDirectoryPath;
-        public string nodeAtlasDirectoryPath;
-        public List<string> visualInputPaths = new List<string>();
+        [NonSerialized] public string nodePreviewDirectoryPath;
+        [NonSerialized] public string nodeAtlasDirectoryPath;
+        [NonSerialized] public List<string> visualInputPaths = new List<string>();
+        public int canvasLeft;
+        public int canvasTop;
+        public int psdWidth;
+        public int psdHeight;
         public int width;
         public int height;
-    }
-
-    /// <summary>
-    /// Psd2UIFormConfig.asset 中 Rules 的精简导出。
-    /// 只导出 AI 需要的"名字 → uiType 候选"映射。
-    /// </summary>
-    [Serializable]
-    [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
-    internal sealed class AiAnalysisConfigInfo
-    {
-        public List<AiAnalysisUiTypeRuleInfo> uiTypeRules = new List<AiAnalysisUiTypeRuleInfo>();
-    }
-
-    [Serializable]
-    [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
-    internal sealed class AiAnalysisUiTypeRuleInfo
-    {
-        public string uiType;
-        public string uiTypeDesc;
-        public string[] typeMatches;
     }
 
     [Serializable]
@@ -69,28 +54,31 @@ namespace UGF.EditorTools.Psd2UGUI
         public string id;
         public string shortId;
         public string parentId;
-        public string[] childIds;
-        public string onlyChildId;
-        public string idPath;
-        public string displayPath;
         public string name;
         public string layerName;
-        public string[] nameTokens;
+        public string referenceKind;
+        public string referenceKey;
+        public string text;
+        public AiTextStyle textStyle;
         public string layerType;
         public bool isGroupLayer;
         public bool isTextLayer;
-        public bool isGeneratedNode;
-        public string uiType;
+        public int sourceIndex;
+        public int sourceLayerId = -1;
         public RectData rect;
         public string imageFile;
-        public string previewKind;
-        public string previewSourceId;
-        public string visualHash;
+        [NonSerialized] public string visualHash;
         public int renderLeafCount;
         public AiAtlasRef atlas;
-        public string suffixMatch;
+        public bool active;
         public int siblingIndex;
         public int childCount;
+        public int drawIndex = -1;
+        public int leafStart = -1;
+        public int leafEnd = -1;
+        public bool compositeBoundary;
+        public bool clipping;
+        public bool requiresBackdrop;
     }
 
     [Serializable]
@@ -100,8 +88,8 @@ namespace UGF.EditorTools.Psd2UGUI
         public string page;
         public int cell;
         public string label;
-        public RectData imageRect;
-        public RectData labelRect;
+        [NonSerialized] public RectData imageRect;
+        [NonSerialized] public RectData labelRect;
     }
 
     [Serializable]

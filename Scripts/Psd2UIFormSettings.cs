@@ -22,6 +22,8 @@ https://shop106471535.taobao.com
 
 namespace UGF.EditorTools.Psd2UGUI
 {
+    public enum PsdImageReuseTolerance { Visual, Strict, Relaxed }
+
     [FilePath("ProjectSettings/Psd2UIFormSettings.asset")]
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     public sealed class Psd2UIFormSettings : ScriptableSingleton<Psd2UIFormSettings>
@@ -46,6 +48,7 @@ namespace UGF.EditorTools.Psd2UGUI
         /// 导出图片后自动裁剪九宫格中心区域至最小尺寸
         /// </summary>
         public bool AutoCropMinimalNineSlice = false;
+        public PsdImageReuseTolerance ImageReuseTolerance = PsdImageReuseTolerance.Visual;
         public string LastUIFormOutputDir = "Assets";
     }
 }

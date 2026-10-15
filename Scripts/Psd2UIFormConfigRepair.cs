@@ -231,8 +231,11 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             SerializedObject serializedObject = new SerializedObject(config);
-            serializedObject.FindProperty("defaultTextType").enumValueIndex = (int)snapshot.defaultTextType;
-            serializedObject.FindProperty("defaultImageType").enumValueIndex = (int)snapshot.defaultImageType;
+            // GUIType 是稀疏枚举（Panel=17 → Background=101）。读写必须同处一个空间：
+            // UGUIParser 导出用 (GUIType)property.intValue、它的导入用 intValue（UGUIParser.cs:343/344/389），
+            // 这条修复路径此前用 enumValueIndex，是仓库里唯一的异类写法。
+            serializedObject.FindProperty("defaultTextType").intValue = (int)snapshot.defaultTextType;
+            serializedObject.FindProperty("defaultImageType").intValue = (int)snapshot.defaultImageType;
             serializedObject.FindProperty("forceUseTMP").boolValue = snapshot.forceUseTMP;
             serializedObject.FindProperty("tmpGradientConversionMode").enumValueIndex = (int)snapshot.tmpGradientConversionMode;
             serializedObject.FindProperty("readmeDoc").stringValue = snapshot.readmeDoc ?? string.Empty;
@@ -251,7 +254,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 RuleSnapshot rule = snapshot.rules[i];
                 rulesProp.InsertArrayElementAtIndex(i);
                 SerializedProperty ruleProp = rulesProp.GetArrayElementAtIndex(i);
-                ruleProp.FindPropertyRelative("UIType").enumValueIndex = (int)rule.UIType;
+                ruleProp.FindPropertyRelative("UIType").intValue = (int)rule.UIType;
                 ruleProp.FindPropertyRelative("UITypeDesc").stringValue = rule.UITypeDesc ?? string.Empty;
                 ruleProp.FindPropertyRelative("UIHelper").stringValue = rule.UIHelper ?? string.Empty;
                 ruleProp.FindPropertyRelative("Comment").stringValue = rule.Comment ?? string.Empty;

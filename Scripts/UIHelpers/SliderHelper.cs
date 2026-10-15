@@ -81,7 +81,8 @@ namespace UGF.EditorTools.Psd2UGUI
 
             var sourceNode = background ?? LayerNode;
             UGUIParser.SetRectTransform(sourceNode, bg);
-            UGUIParser.Instance.BindImage(sourceNode, bg);
+            if (LayerNode.IsAiAuthoritative) BindOptionalControlImage(background, bg);
+            else UGUIParser.Instance.BindImage(sourceNode, bg);
         }
 
         private void SetupTrackAreas(Slider slider, RectInfo sliderInfo, RectInfo trackInfo)
@@ -98,7 +99,7 @@ namespace UGF.EditorTools.Psd2UGUI
             var fillImg = fillRect.GetComponent<Image>();
             if (fillImg != null)
             {
-                UGUIParser.Instance.BindImage(fill, fillImg);
+                BindOptionalControlImage(fill, fillImg);
             }
 
             if (fillInfo.HasValue)
@@ -172,7 +173,7 @@ namespace UGF.EditorTools.Psd2UGUI
             target.anchoredPosition = anchored;
         }
 
-        private static float CalculateNormalizedValue(RectInfo trackInfo, RectInfo? fillInfo, RectInfo? handleInfo, bool horizontal, out Slider.Direction direction)
+        internal static float CalculateNormalizedValue(RectInfo trackInfo, RectInfo? fillInfo, RectInfo? handleInfo, bool horizontal, out Slider.Direction direction)
         {
             direction = horizontal ? Slider.Direction.LeftToRight : Slider.Direction.BottomToTop;
             float length = horizontal ? trackInfo.Width : trackInfo.Height;
@@ -188,7 +189,12 @@ namespace UGF.EditorTools.Psd2UGUI
                 float endEdge = horizontal ? trackInfo.Right : trackInfo.Top;
                 float fillStart = horizontal ? fill.Left : fill.Bottom;
                 float fillEnd = horizontal ? fill.Right : fill.Top;
-                bool startAnchor = Mathf.Abs(fillStart - startEdge) <= Mathf.Abs(endEdge - fillEnd);
+                float startGap = Mathf.Abs(fillStart - startEdge);
+                float endGap = Mathf.Abs(endEdge - fillEnd);
+                // Full/nearly full fills and symmetric insets have no directional evidence.
+                // Ignore export rounding and border differences up to 1 px or 1% of the track.
+                float tolerance = Mathf.Max(1f, length * 0.01f);
+                bool startAnchor = startGap <= endGap + tolerance;
 
                 direction = horizontal
                     ? (startAnchor ? Slider.Direction.LeftToRight : Slider.Direction.RightToLeft)
@@ -293,7 +299,7 @@ namespace UGF.EditorTools.Psd2UGUI
             return null;
         }
 
-        private readonly struct RectInfo
+        internal readonly struct RectInfo
         {
             public RectInfo(Rect rect)
             {

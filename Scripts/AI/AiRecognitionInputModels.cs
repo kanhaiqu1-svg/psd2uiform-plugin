@@ -1,17 +1,3 @@
-/*
- * Copyright (c) 2023-2026 Beijing Yiqu Technology Co., Ltd.
- *
- * All Rights Reserved.
- *
- * The software and associated documentation (including but not limited to source code,
- * object code, documents, images, audio, and video files) are the intellectual property
- * of Beijing Yiqu Technology Co., Ltd.
- *
- * For commercial use or licensing inquiries, please contact:
- * Email: efunstudio@gmail.com
- * Website: https://efunstudio.cn
- */
-
 #if UNITY_EDITOR
 using System;
 using System.Collections.Generic;
@@ -23,75 +9,28 @@ namespace UGF.EditorTools.Psd2UGUI
     internal sealed class AiRecognitionInputManifestDocument
     {
         public string version;
-        public string treeHash;
         public AiRecognitionInputDocumentInfo document;
-        public AiAnalysisConfigInfo config;
         public int nodeCount;
-        public string[] nodeShardPaths;
+        public string nodeFilePath;
+        public string nodeColumns = "id\tparent\tname\tlayerName\tkind\tdraw(first,last)\trect(x,y,w,h)\tatlas(page:cell)\tdetail\tactive(1/0)\ttext\treuse\ttextStyle";
+        public string[] atlasPaths;
+        public List<AiRecognitionHelperContract> helperContracts;
     }
 
     [Serializable]
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     internal sealed class AiRecognitionInputDocumentInfo
     {
+        // All image references below are relative to this directory and never carry
+        // the Unity project path into the CLI session.
+        public string imageRoot;
         public string previewImagePath;
         public string annotatedPreviewImagePath;
-        public string nodePreviewDirectoryPath;
-        public string nodeAtlasDirectoryPath;
-        public int atlasPageCount;
         public int width;
         public int height;
+        // 附件里的整图可能被等比缩小，而 width/height 和 nodes.tsv 的 rect 始终是原始画布坐标。
+        public float previewScale = 1f;
     }
 
-    [Serializable]
-    [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
-    internal sealed class AiRecognitionNodeShardDocument
-    {
-        public string version;
-        public string treeHash;
-        public int shardIndex;
-        public int totalShards;
-        public List<AiRecognitionInputNodeEntry> nodes = new List<AiRecognitionInputNodeEntry>();
-    }
-
-    [Serializable]
-    [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
-    internal sealed class AiRecognitionInputNodeEntry
-    {
-        public string id;
-        public string shortId;
-        public string parentId;
-        public string[] childIds;
-        public string onlyChildId;
-        public string idPath;
-        public string displayPath;
-        public string name;
-        public string layerName;
-        public string[] nameTokens;
-        public string layerType;
-        public bool isGroupLayer;
-        public bool isTextLayer;
-        public bool isGeneratedNode;
-        public string uiType;
-        public RectData rect;
-        public string previewFileName;
-        public string previewKind;
-        public string previewSourceId;
-        public string visualHash;
-        public int renderLeafCount;
-        public AiRecognitionInputAtlasRef atlas;
-        public string suffixMatch;
-        public int siblingIndex;
-        public int childCount;
-    }
-
-    [Serializable]
-    [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
-    internal sealed class AiRecognitionInputAtlasRef
-    {
-        public string page;
-        public int cell;
-        public string label;
-    }
 }
 #endif

@@ -32,6 +32,9 @@ using cn.efunstudio.psdreader.PsdParser;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
+#if UNITY_6000_3_OR_NEWER
+using UnityEngine.TextCore;
+#endif
 
 namespace UGF.EditorTools.Psd2UGUI
 {
@@ -91,6 +94,7 @@ namespace UGF.EditorTools.Psd2UGUI
         ScrollView_VerticalBarBG, // Vertical scrollbar background
         ScrollView_VerticalBar, // Vertical scrollbar handle
     }
+    [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     public enum TMPGradientConversionMode
     {
         Auto = 0,
@@ -112,7 +116,28 @@ namespace UGF.EditorTools.Psd2UGUI
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     internal sealed class UGUIParserEditor : Editor
     {
+        private static readonly GUIContent[] ImageReuseToleranceNames = {
+            new GUIContent("视觉一致（推荐）", "允许轻微色阶和边缘栅格化差异。"),
+            new GUIContent("严格", "使用更小的图片差异容差。"),
+            new GUIContent("宽松", "允许更明显的细节差异。")
+        };
+        private static readonly GUIContent[] TmpGradientModeNames = {
+            new GUIContent("自动（推荐）", "简单渐变使用原生 TMP 渐变，复杂渐变使用纹理还原。"),
+            new GUIContent("原生渐变（可编辑）", "使用 TMP 原生渐变，方便后续编辑。"),
+            new GUIContent("纹理渐变（精确还原）", "生成渐变纹理，保留 PSD 渐变效果。")
+        };
+        private static readonly GUIContent UIFormTemplateLabel = new GUIContent("界面模板", "生成 UI 界面时使用的根预制体。");
+        private static readonly GUIContent ForceTmpLabel = new GUIContent("优先使用 TMP", "将文本、按钮、下拉框、输入框和开关转换为 TMP 类型，包含 AI 识别结果。常规 PSD 图层的显式后端标签仍优先。");
+        private static readonly GUIContent TmpGradientLabel = new GUIContent("TMP 渐变", "PSD 文本渐变转换为 TMP 效果时使用的方式。");
+        private static readonly GUIContent NamingLabel = new GUIContent("中文名转拼音", "将生成对象名称中的中文转换为拼音，不影响显示的文本内容。");
+        private static readonly GUIContent NineSliceLabel = new GUIContent("九宫格识别容差", "默认值为 5。值越大，自动识别九宫格边框时允许的像素差异越大。");
+        private static readonly GUIContent ImageReuseLabel = new GUIContent("图片复用精度", "用于普通图片和九宫格图片的自动复用，重新导出或整理图片后生效。Point 采样与高位深图片仍使用精确匹配。");
+        private static readonly GUIContent AutoCropLabel = new GUIContent("自动裁剪九宫格", "导出时裁剪九宫格的中心区域。建议先检查边框，再通过图片右键菜单 Psd2UIForm > Crop Minimal 9-Slice 手动裁剪。");
+        private static readonly GUIContent SharedImagesLabel = new GUIContent("复用图片目录", "复用图片的导出目录，路径相对于 Unity 工程根目录。");
+        private static readonly GUIContent SharedPrefabsLabel = new GUIContent("复用预制体目录", "复用预制体的导出目录，路径相对于 Unity 工程根目录。");
+        private static readonly GUIContent CliWindowLabel = new GUIContent("显示调试窗口", "AI 识别时显示 CLI 日志窗口，任务结束或取消后自动关闭。");
         private SerializedProperty readmeProperty;
+        private SerializedProperty uiFormTemplate;
         private SerializedProperty defaultTextType;
         private SerializedProperty defaultImageType;
         private SerializedProperty forceUseTMP;
@@ -121,7 +146,8 @@ namespace UGF.EditorTools.Psd2UGUI
         private SerializedProperty nineSliceBorderTolerance;
         private SerializedProperty sharedAssetsOutput;
         private SerializedProperty sharedPrefabOutput;
-        private SerializedProperty aiProviderConfig;
+        private SerializedProperty aiMode;
+        private SerializedProperty showCliWindow;
         private string[] textTypesDisplay;
         private int[] textTypes;
         private string[] imageTypesDisplay;
@@ -130,6 +156,7 @@ namespace UGF.EditorTools.Psd2UGUI
         private void OnEnable()
         {
             readmeProperty = serializedObject.FindProperty("readmeDoc");
+            uiFormTemplate = serializedObject.FindProperty("uiFormTemplate");
             defaultTextType = serializedObject.FindProperty("defaultTextType");
             defaultImageType = serializedObject.FindProperty("defaultImageType");
             forceUseTMP = serializedObject.FindProperty("forceUseTMP");
@@ -138,7 +165,9 @@ namespace UGF.EditorTools.Psd2UGUI
             nineSliceBorderTolerance = serializedObject.FindProperty("nineSliceBorderTolerance");
             sharedAssetsOutput = serializedObject.FindProperty("sharedAssetsOutput");
             sharedPrefabOutput = serializedObject.FindProperty("sharedPrefabOutput");
-            aiProviderConfig = serializedObject.FindProperty("aiProviderConfig");
+            var aiProviderConfig = serializedObject.FindProperty("aiProviderConfig");
+            aiMode = aiProviderConfig.FindPropertyRelative("mode");
+            showCliWindow = aiProviderConfig.FindPropertyRelative("showCliWindow");
             var textEnums = new GUIType[] { GUIType.Text, GUIType.TMPText };
             textTypes = new int[textEnums.Length];
             textTypesDisplay = new string[textEnums.Length];
@@ -163,161 +192,124 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             serializedObject.Update();
             PsdReaderProductAccess.EnsureDailyUpdateCheck();
-            if (GUILayout.Button("使用教程"))
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                Application.OpenURL("https://efunstudio.cn");
-            }
-            if (GUILayout.Button("导出使用文档"))
-            {
-                (target as UGUIParser).ExportReadmeDoc();
-            }
-            if (GUILayout.Button("导出PS脚本工具"))
-            {
-                (target as UGUIParser).ExportLayerTagMenuConfig();
-            }
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                if (GUILayout.Button("导出配置json"))
-                {
-                    ExportConfigJson(serializedObject);
-                }
-
-                if (GUILayout.Button("从json导入配置"))
-                {
-                    ImportConfigFromJson(serializedObject);
-                    GUIUtility.ExitGUI();
-                }
-            }
-
-            if (GUILayout.Button("新手引导"))
-            {
-                Psd2UIFormOnboardingWindow.ShowWindow();
-            }
-
-            EditorGUILayout.LabelField("使用说明:");
-            readmeProperty.stringValue = EditorGUILayout.TextArea(readmeProperty.stringValue, GUILayout.Height(100));
-
-            EditorGUILayout.Space(4);
-            EditorGUILayout.LabelField("插件授权:");
-            using (new EditorGUILayout.VerticalScope("box"))
-            {
-                EditorGUILayout.LabelField("当前状态:", PsdReaderProductAccess.GetStatusLabel());
-
-                MessageType messageType = PsdReaderProductAccess.NeedsAttention
-                    ? MessageType.Warning
-                    : MessageType.Info;
-                EditorGUILayout.HelpBox(PsdReaderProductAccess.GetOverviewMessage(), messageType);
-
+                EditorGUILayout.LabelField("工具与帮助", EditorStyles.boldLabel);
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    if (GUILayout.Button("授权管理"))
-                    {
-                        PsdReaderProductAccess.OpenManagementWindow();
-                    }
-
-                    if (GUILayout.Button("获取订单号"))
-                    {
-                        Application.OpenURL("https://shop106471535.taobao.com");
-                    }
+                    if (GUILayout.Button("新手指引")) Psd2UIFormOnboardingWindow.ShowWindow();
+                    if (GUILayout.Button("在线教程")) Application.OpenURL("https://efunstudio.cn");
                 }
-
-                if (PsdReaderProductAccess.HasPendingUpdateTip())
+                using (new EditorGUILayout.HorizontalScope())
                 {
-                    if (Psd2UIFormEditorNoticeUtility.DrawVersionUpdateNotice(PsdReaderProductAccess.GetPendingUpdateTipMessage(), "下载"))
+                    if (GUILayout.Button("导出使用文档")) ((UGUIParser)target).ExportReadmeDoc();
+                    if (GUILayout.Button("导出并安装 PS 脚本"))
                     {
-                        if (PsdReaderProductAccess.TryOpenPendingUpdateDownloadUrl())
-                        {
-                            GUIUtility.ExitGUI();
-                        }
+                        serializedObject.ApplyModifiedProperties();
+                        ((UGUIParser)target).ExportLayerTagMenuConfig();
                     }
                 }
-            }
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                nineSliceBorderTolerance.intValue = EditorGUILayout.IntSlider("九宫识别容错(默认:5)", nineSliceBorderTolerance.intValue, 1, 10);
-            }
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                Psd2UIFormSettings.Instance.AutoCropMinimalNineSlice = EditorGUILayout.ToggleLeft("导出时自动裁剪九宫格", Psd2UIFormSettings.Instance.AutoCropMinimalNineSlice);
-            }
-            EditorGUILayout.HelpBox("九宫格边框由程序自动识别，结果可能与预期不符。建议保持关闭，导出后手动检查边框，再通过右键菜单 Psd2UIForm > Crop Minimal 9-Slice 批量裁剪，更安全可控。", MessageType.Info);
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                defaultTextType.intValue = EditorGUILayout.IntPopup("默认文本类型:", defaultTextType.intValue, textTypesDisplay, textTypes);
-            }
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                defaultImageType.intValue = EditorGUILayout.IntPopup("默认图片类型:", defaultImageType.intValue, imageTypesDisplay, imageTypes);
-            }
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                forceUseTMP.boolValue = EditorGUILayout.ToggleLeft("强制优先使用TMP", forceUseTMP.boolValue);
-            }
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                EditorGUILayout.PropertyField(tmpGradientConversionMode, new GUIContent("TMP渐变转换"));
-            }
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                convertZh2En.boolValue = EditorGUILayout.ToggleLeft("中文转拼音", convertZh2En.boolValue);
-            }
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                sharedAssetsOutput.stringValue = EditorGUILayout.TextField("复用图片导出路径", sharedAssetsOutput.stringValue);
-                if (GUILayout.Button("Select", GUILayout.Width(60)))
+                using (new EditorGUILayout.HorizontalScope())
                 {
-                    string path = EditorUtility.OpenFolderPanel("选择导出路径", Application.dataPath, "");
-
-                    if (!string.IsNullOrEmpty(path))
+                    if (GUILayout.Button("导出配置 JSON")) ExportConfigJson(serializedObject);
+                    if (GUILayout.Button("导入配置 JSON"))
                     {
-                        sharedAssetsOutput.stringValue = PathExtensions.GetRelativePath(Directory.GetParent(Application.dataPath).FullName, path); ;
+                        ImportConfigFromJson(serializedObject);
+                        GUIUtility.ExitGUI();
                     }
                 }
+                EditorGUILayout.LabelField("使用说明", EditorStyles.miniBoldLabel);
+                readmeProperty.stringValue = EditorGUILayout.TextArea(readmeProperty.stringValue, GUILayout.Height(80));
             }
 
-            using (new EditorGUILayout.HorizontalScope())
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                sharedPrefabOutput.stringValue = EditorGUILayout.TextField("复用prefab导出路径", sharedPrefabOutput.stringValue);
-                if (GUILayout.Button("Select", GUILayout.Width(60)))
+                EditorGUILayout.LabelField("授权与更新", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("授权状态", PsdReaderProductAccess.GetStatusLabel());
+                EditorGUILayout.HelpBox(PsdReaderProductAccess.GetOverviewMessage(),
+                    PsdReaderProductAccess.NeedsAttention ? MessageType.Warning : MessageType.Info);
+                using (new EditorGUILayout.HorizontalScope())
                 {
-                    string path = EditorUtility.OpenFolderPanel("选择导出路径", Application.dataPath, "");
+                    if (GUILayout.Button("授权管理")) PsdReaderProductAccess.OpenManagementWindow();
+                    if (GUILayout.Button("获取订单号")) Application.OpenURL("https://shop106471535.taobao.com");
+                }
+                if (PsdReaderProductAccess.HasPendingUpdateTip()
+                    && Psd2UIFormEditorNoticeUtility.DrawVersionUpdateNotice(PsdReaderProductAccess.GetPendingUpdateTipMessage(), "下载"))
+                {
+                    if (PsdReaderProductAccess.TryOpenPendingUpdateDownloadUrl()) GUIUtility.ExitGUI();
+                }
+            }
 
-                    if (!string.IsNullOrEmpty(path))
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                EditorGUILayout.LabelField("界面生成", EditorStyles.boldLabel);
+                EditorGUILayout.PropertyField(uiFormTemplate, UIFormTemplateLabel);
+                defaultImageType.intValue = EditorGUILayout.IntPopup("默认图片类型", defaultImageType.intValue, imageTypesDisplay, imageTypes);
+                defaultTextType.intValue = EditorGUILayout.IntPopup("默认文本类型", defaultTextType.intValue, textTypesDisplay, textTypes);
+                EditorGUILayout.PropertyField(forceUseTMP, ForceTmpLabel);
+                tmpGradientConversionMode.intValue = EditorGUILayout.Popup(TmpGradientLabel, tmpGradientConversionMode.intValue, TmpGradientModeNames);
+                EditorGUILayout.PropertyField(convertZh2En, NamingLabel);
+            }
+
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                EditorGUILayout.LabelField("AI 识别", EditorStyles.boldLabel);
+                DrawAiProviderConfig();
+            }
+
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                EditorGUILayout.LabelField("图片处理", EditorStyles.boldLabel);
+                var settings = Psd2UIFormSettings.Instance;
+                var reuseTolerance = (PsdImageReuseTolerance)EditorGUILayout.Popup(ImageReuseLabel, (int)settings.ImageReuseTolerance, ImageReuseToleranceNames);
+                nineSliceBorderTolerance.intValue = EditorGUILayout.IntSlider(NineSliceLabel, nineSliceBorderTolerance.intValue, 1, 10);
+                bool autoCrop = EditorGUILayout.Toggle(AutoCropLabel, settings.AutoCropMinimalNineSlice);
+                if (reuseTolerance != settings.ImageReuseTolerance || autoCrop != settings.AutoCropMinimalNineSlice)
+                {
+                    Undo.RecordObject(settings, "修改图片处理设置");
+                    settings.ImageReuseTolerance = reuseTolerance;
+                    settings.AutoCropMinimalNineSlice = autoCrop;
+                    Psd2UIFormSettings.Save();
+                }
+                if (autoCrop) EditorGUILayout.HelpBox("自动识别的边框可能不准确，导出后请检查。", MessageType.Info);
+            }
+
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                EditorGUILayout.LabelField("资源输出", EditorStyles.boldLabel);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    sharedAssetsOutput.stringValue = EditorGUILayout.TextField(SharedImagesLabel, sharedAssetsOutput.stringValue);
+                    if (GUILayout.Button("选择…", GUILayout.Width(54)))
                     {
-                        sharedPrefabOutput.stringValue = PathExtensions.GetRelativePath(Directory.GetParent(Application.dataPath).FullName, path); ;
+                        string path = EditorUtility.OpenFolderPanel("选择复用图片目录", Application.dataPath, "");
+                        if (!string.IsNullOrEmpty(path))
+                            sharedAssetsOutput.stringValue = PathExtensions.GetRelativePath(Directory.GetParent(Application.dataPath).FullName, path);
+                    }
+                }
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    sharedPrefabOutput.stringValue = EditorGUILayout.TextField(SharedPrefabsLabel, sharedPrefabOutput.stringValue);
+                    if (GUILayout.Button("选择…", GUILayout.Width(54)))
+                    {
+                        string path = EditorUtility.OpenFolderPanel("选择复用预制体目录", Application.dataPath, "");
+                        if (!string.IsNullOrEmpty(path))
+                            sharedPrefabOutput.stringValue = PathExtensions.GetRelativePath(Directory.GetParent(Application.dataPath).FullName, path);
                     }
                 }
             }
 
-            DrawAiProviderConfig();
+            EditorGUILayout.Space(6);
+            DrawPropertiesExcluding(serializedObject, "m_Script", "uiFormTemplate");
             serializedObject.ApplyModifiedProperties();
-            base.OnInspectorGUI();
         }
 
         private void DrawAiProviderConfig()
         {
-            if (aiProviderConfig == null) return;
-
-            var providerProp = aiProviderConfig.FindPropertyRelative("provider");
-            var showCliWindowProp = aiProviderConfig.FindPropertyRelative("showCliWindow");
-            var provider = ReadAiProviderKind(providerProp);
-
-            var nextProvider = (AiProviderKind)EditorGUILayout.EnumPopup("AI 智能识别", provider);
-            WriteAiProviderKind(providerProp, nextProvider);
-            if (showCliWindowProp != null)
-            {
-                EditorGUILayout.PropertyField(showCliWindowProp, new GUIContent("CLI显示窗口"));
-            }
-            EditorGUILayout.HelpBox("注意: AI智能识别是调用本机已安装配置的Codex、Claude Code、Open Code, 识别需要模型拥有多模态能力(根据图像识别类型), 识别准确度与AI模型能力有关", MessageType.Info);
+            int selected = aiMode.intValue;
+            if ((uint)selected >= UGF.EditorTools.Psd2UGUI.Cli.AiProfiles.LlmModes.Length) selected = (int)UGF.EditorTools.Psd2UGUI.Cli.AiMode.Qoder;
+            aiMode.intValue = EditorGUILayout.Popup("CLI 工具", selected, UGF.EditorTools.Psd2UGUI.Cli.AiProfiles.LlmModeNames);
+            EditorGUILayout.PropertyField(showCliWindow, CliWindowLabel);
         }
 
         private void ImportConfigFromJson(SerializedObject serializedObject)
@@ -516,9 +508,8 @@ namespace UGF.EditorTools.Psd2UGUI
 
             return new AiProviderConfigSnapshot
             {
-                provider = ReadAiProviderKind(aiProviderConfigProperty.FindPropertyRelative("provider")),
-                showCliWindow = aiProviderConfigProperty.FindPropertyRelative("showCliWindow") == null
-                    || aiProviderConfigProperty.FindPropertyRelative("showCliWindow").boolValue
+                mode = (UGF.EditorTools.Psd2UGUI.Cli.AiMode)aiProviderConfigProperty.FindPropertyRelative("mode").intValue,
+                showCliWindow = aiProviderConfigProperty.FindPropertyRelative("showCliWindow").boolValue
             };
         }
 
@@ -526,52 +517,11 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (aiProviderConfigProperty == null || snapshot == null) return;
 
-            WriteAiProviderKind(aiProviderConfigProperty.FindPropertyRelative("provider"), snapshot.provider);
+            aiProviderConfigProperty.FindPropertyRelative("mode").intValue = (int)snapshot.mode;
             var showCliWindowProp = aiProviderConfigProperty.FindPropertyRelative("showCliWindow");
             if (showCliWindowProp != null)
             {
                 showCliWindowProp.boolValue = snapshot.showCliWindow;
-            }
-        }
-
-        private static AiProviderKind ReadAiProviderKind(SerializedProperty providerProperty)
-        {
-            if (providerProperty == null)
-            {
-                return AiProviderKind.CodexCli;
-            }
-
-            switch (providerProperty.intValue)
-            {
-                case (int)AiProviderKind.CodexCli:
-                    return AiProviderKind.CodexCli;
-                case (int)AiProviderKind.ClaudeCodeCli:
-                    return AiProviderKind.ClaudeCodeCli;
-                case (int)AiProviderKind.OpenCodeCli:
-                    return AiProviderKind.OpenCodeCli;
-                default:
-                    providerProperty.intValue = (int)AiProviderKind.CodexCli;
-                    return AiProviderKind.CodexCli;
-            }
-        }
-
-        private static void WriteAiProviderKind(SerializedProperty providerProperty, AiProviderKind provider)
-        {
-            if (providerProperty == null)
-            {
-                return;
-            }
-
-            switch (provider)
-            {
-                case AiProviderKind.CodexCli:
-                case AiProviderKind.ClaudeCodeCli:
-                case AiProviderKind.OpenCodeCli:
-                    providerProperty.intValue = (int)provider;
-                    break;
-                default:
-                    providerProperty.intValue = (int)AiProviderKind.CodexCli;
-                    break;
             }
         }
 
@@ -609,8 +559,8 @@ namespace UGF.EditorTools.Psd2UGUI
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
         private sealed class AiProviderConfigSnapshot
         {
-            public AiProviderKind provider;
-            public bool showCliWindow = true;
+            public UGF.EditorTools.Psd2UGUI.Cli.AiMode mode = UGF.EditorTools.Psd2UGUI.Cli.AiMode.Qoder;
+            public bool showCliWindow;
         }
     }
     [CanEditMultipleObjects]
@@ -630,6 +580,7 @@ namespace UGF.EditorTools.Psd2UGUI
         [HideInInspector][SerializeField] GUIType defaultImageType = GUIType.Image;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [SerializeField, HideInInspector] bool forceUseTMP = false;
+        [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [SerializeField, HideInInspector] TMPGradientConversionMode tmpGradientConversionMode = TMPGradientConversionMode.Auto;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [SerializeField] GameObject uiFormTemplate;
@@ -666,13 +617,13 @@ namespace UGF.EditorTools.Psd2UGUI
         private static readonly Dictionary<string, Material> tmpEffectMaterialCache = new Dictionary<string, Material>();
         private static readonly Dictionary<string, Texture2D> tmpGradientTextureCache = new Dictionary<string, Texture2D>();
         private static readonly Dictionary<
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             EntityId,
 #else
             int,
 #endif
             Material> tmpEffectMaterialBaseLookup = new Dictionary<
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
                 EntityId,
 #else
                 int,
@@ -680,14 +631,14 @@ namespace UGF.EditorTools.Psd2UGUI
                 Material>();
 
         private static
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             EntityId
 #else
             int
 #endif
             GetObjectId(UnityEngine.Object obj)
         {
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             return obj.GetEntityId();
 #else
             return obj.GetInstanceID();
@@ -731,8 +682,21 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 if (mInstance == null)
                 {
-                    var guid = AssetDatabase.FindAssets("t:UGUIParser").FirstOrDefault();
-                    mInstance = AssetDatabase.LoadAssetAtPath<UGUIParser>(AssetDatabase.GUIDToAssetPath(guid));
+                    var guids = AssetDatabase.FindAssets("t:UGUIParser");
+                    if (guids == null || guids.Length == 0) return null;
+                    // FindAssets 顺序不固定：多份配置时用户改的可能永远不是被取用的那份。固定取路径最靠前的，
+                    // 并优先插件自带目录，保证跨机器一致。
+                    System.Array.Sort(guids, (a, b) => string.Compare(
+                        AssetDatabase.GUIDToAssetPath(a), AssetDatabase.GUIDToAssetPath(b), System.StringComparison.OrdinalIgnoreCase));
+                    var preferred = guids.FirstOrDefault(g =>
+                    {
+                        var p = AssetDatabase.GUIDToAssetPath(g);
+                        return !string.IsNullOrEmpty(p) && p.IndexOf("Plugins/PSD2UIForm", System.StringComparison.OrdinalIgnoreCase) >= 0;
+                    });
+                    var picked = string.IsNullOrEmpty(preferred) ? guids[0] : preferred;
+                    var assetPath = AssetDatabase.GUIDToAssetPath(picked);
+                    if (string.IsNullOrEmpty(assetPath)) return null;
+                    mInstance = AssetDatabase.LoadAssetAtPath<UGUIParser>(assetPath);
                 }
                 return mInstance;
             }
@@ -850,9 +814,14 @@ namespace UGF.EditorTools.Psd2UGUI
                     return false;
             }
         }
-        internal GUIType ResolvePreferredUIType(GUIType uiType)
+        internal GUIType ResolvePreferredUIType(GUIType uiType, string layerName = null, PsdLayerType layerType = PsdLayerType.Unknown)
         {
             if (!forceUseTMP) return uiType;
+            if (layerName != null)
+            {
+                TryParseLayerTags(layerName, layerType, out var tags, emitWarnings: false);
+                if (tags.HasExplicitTextBackend) return uiType;
+            }
 
             switch (uiType)
             {
@@ -1060,7 +1029,8 @@ namespace UGF.EditorTools.Psd2UGUI
             while (!string.IsNullOrWhiteSpace(workingName))
             {
                 int splitIndex = workingName.LastIndexOf(UITYPE_SPLIT_CHAR);
-                if (splitIndex <= 0 || splitIndex >= workingName.Length - 1)
+                // splitIndex==0 表示整个名字就是一个标签（.btn/.tmp），按文档口径应当识别。
+                if (splitIndex < 0 || splitIndex >= workingName.Length - 1)
                 {
                     break;
                 }
@@ -1092,6 +1062,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             ResolveParsedTypes(parsedInfo, layerType);
+#if EFUN_DEBUG
             if (emitWarnings && parsedInfo.Warnings.Count > 0)
             {
                 for (int i = 0; i < parsedInfo.Warnings.Count; i++)
@@ -1099,6 +1070,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     Debug.LogWarning($"Layer tag warning [{rawName}]: {parsedInfo.Warnings[i]}");
                 }
             }
+#endif
             return true;
         }
         private void ResolveParsedTypes(ParsedLayerTagInfo parsedInfo, PsdLayerType layerType)
@@ -1174,7 +1146,8 @@ namespace UGF.EditorTools.Psd2UGUI
             var rule = GetRule(uiType);
             if (rule == null || string.IsNullOrWhiteSpace(rule.UIHelper)) return null;
 
-            return Type.GetType(rule.UIHelper);
+            // Helper 常在别的程序集里，Type.GetType 只认当前程序集与限定程序集名，会静默不挂控件。
+            return ResolveType(rule.UIHelper);
         }
         internal UGUIParseRule[] GetRules()
         {
@@ -1182,9 +1155,10 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         internal UGUIParseRule GetRule(GUIType uiType)
         {
-            foreach (var rule in rules)
+            // rules 允许为空（GetRules 就有 ?? 兜底），这里直接 foreach 会在配置缺失时全线 NRE。
+            foreach (var rule in GetRules())
             {
-                if (rule.UIType == uiType) return rule;
+                if (rule != null && rule.UIType == uiType) return rule;
             }
             return null;
         }
@@ -1237,7 +1211,9 @@ namespace UGF.EditorTools.Psd2UGUI
 
             if (parsedInfo.MainType != GUIType.Null)
             {
-                result = ResolvePreferredRule(GetRule(parsedInfo.MainType));
+                var mainRule = GetRule(parsedInfo.MainType);
+                // 图层已显式标了 .tmp/.ugui，类型在标签解析时就定好了，不能再被"强制优先使用TMP"改写一次。
+                result = parsedInfo.HasExplicitTextBackend ? mainRule : ResolvePreferredRule(mainRule);
             }
 
             return result != null;
@@ -1348,10 +1324,50 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (uiNode == null || layerNode == null) return;
 
+            // 文本图层按图层 rect 自由定位。模板里的拉伸锚点(如 Dropdown 的 caption Label)会让
+            // SetSizeWithCurrentAnchors 以父节点尺寸为基准,图层宽高无法生效 —— 先归一化为点锚点。
+            var rectTransform = uiNode.GetComponent<RectTransform>();
+            if (rectTransform != null)
+            {
+                rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+                rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+            }
+
             var sourceRect = layerNode.TryGetTextLayoutRect(out var textRect)
                 ? textRect
                 : layerNode.LayerRect;
             ApplyRectTransform(sourceRect, uiNode, true, true, true, 0);
+
+            // AI supplied this layout; font substitution must not rewrite its dimensions.
+            if (layerNode.HasAuthoredAiText || layerNode.HasExplicitAiTextRect) return;
+
+            // 单行宽度校准:字体替代后 Unity 渲染宽度与 PSD 框宽存在度量差异,
+            // Wrap 模式下按框宽换行会破坏单行文本的 PSD 还原。
+            // 判定:文本框高度仅够一行(≤ 无约束实测行高 ×1.3)且内容在框宽下放不下(无约束宽 > 框宽)→ 扩宽 rect 到无约束实测宽。
+            if (rectTransform != null)
+            {
+                float unconstrainedWidth = -1f;
+                float unconstrainedHeight = -1f;
+                if (uiNode is Text uiText && !string.IsNullOrEmpty(uiText.text))
+                {
+                    var settings = uiText.GetGenerationSettings(Vector2.zero);
+                    unconstrainedWidth = uiText.cachedTextGenerator.GetPreferredWidth(uiText.text, settings);
+                    unconstrainedHeight = uiText.cachedTextGenerator.GetPreferredHeight(uiText.text, settings);
+                }
+                else if (uiNode is TMPro.TextMeshProUGUI tmpText && !string.IsNullOrEmpty(tmpText.text))
+                {
+                    var preferred = tmpText.GetPreferredValues(tmpText.text, float.MaxValue, float.MaxValue);
+                    unconstrainedWidth = preferred.x;
+                    unconstrainedHeight = preferred.y;
+                }
+
+                if (unconstrainedWidth > sourceRect.width + 0.01f
+                    && unconstrainedHeight > 0f
+                    && sourceRect.height <= unconstrainedHeight * 1.3f)
+                {
+                    rectTransform.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, unconstrainedWidth);
+                }
+            }
         }
 
         internal static void SetInputFieldTextRectTransform(
@@ -1417,17 +1433,22 @@ namespace UGF.EditorTools.Psd2UGUI
         /// <returns></returns>
         internal static Texture2D LayerNode2Texture(PsdLayerNode layerNode)
         {
-            if (layerNode != null)
+            if (layerNode == null) return null;
+            try
             {
                 var spAssetName = layerNode.ExportImageAsset(false);
-                var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(spAssetName);
+                if (Psd2UIFormConverter.Instance.ImageExport != null
+                    && Psd2UIFormConverter.Instance.ImageExport.TryTemporary(spAssetName, false, out var temporary)) return (Texture2D)temporary;
+                var texture = string.IsNullOrEmpty(spAssetName) ? null : AssetDatabase.LoadAssetAtPath<Texture2D>(spAssetName);
+                if (texture == null) Psd2UIFormConverter.Instance.RecordGenerationIssue(layerNode, "texture_binding_failed", "图片资源无法生成或加载。");
                 return texture;
             }
+            catch (Exception ex) { Psd2UIFormConverter.Instance.RecordGenerationIssue(layerNode, "texture_binding_failed", ex.Message); }
             return null;
         }
         internal Image.Type ResolveFinalImageType(PsdLayerNode layerNode, Image.Type templateImageType)
         {
-            if (layerNode == null)
+            if (layerNode == null || layerNode.IsAiAuthoritative)
             {
                 return templateImageType;
             }
@@ -1445,6 +1466,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 return null;
             }
 
+            PsdGeneratedDrawOrder.Register(layerNode, image);
             var finalImageType = ResolveFinalImageType(layerNode, image.type);
             image.type = finalImageType;
             var sprite = LayerNode2Sprite(layerNode, ShouldAutoCalculateNineSlice(finalImageType));
@@ -1459,24 +1481,28 @@ namespace UGF.EditorTools.Psd2UGUI
         /// <returns></returns>
         internal static Sprite LayerNode2Sprite(PsdLayerNode layerNode, bool auto9Slice = false)
         {
-            if (layerNode != null)
+            if (layerNode == null) return null;
+            try
             {
-                var spAssetName = layerNode.ExportImageAsset(true);
+                var spAssetName = layerNode.ExportImageAsset(true, auto9Slice: auto9Slice);
+                if (Psd2UIFormConverter.Instance.ImageExport != null
+                    && Psd2UIFormConverter.Instance.ImageExport.TryTemporary(spAssetName, true, out var temporary)) return (Sprite)temporary;
+                bool shared = layerNode.HasReuseReference || Psd2UIFormConverter.Instance.TryGetSharedSpritePath(layerNode, out _);
+                if (shared && !string.IsNullOrEmpty(spAssetName) && AssetImporter.GetAtPath(spAssetName) is TextureImporter importer
+                    && importer.textureType != TextureImporterType.Sprite)
+                {
+                    importer.textureType = TextureImporterType.Sprite;
+                    importer.spriteImportMode = SpriteImportMode.Single;
+                    importer.SaveAndReimport();
+                }
                 var sprite = PsdLayerNode.LoadSpriteAssetAtPath(spAssetName);
                 if (sprite != null)
                 {
-                    if (auto9Slice)
-                    {
-                        Psd2UIFormConverter.ApplySpriteNineSlice(spAssetName);
-                        if (Psd2UIFormSettings.Instance.AutoCropMinimalNineSlice)
-                        {
-                            RightClickExtension.TryCropMinimalNineSlice(spAssetName);
-                        }
-                        sprite = PsdLayerNode.LoadSpriteAssetAtPath(spAssetName) ?? sprite;
-                    }
                     return sprite;
                 }
+                Psd2UIFormConverter.Instance.RecordGenerationIssue(layerNode, "sprite_binding_failed", "Sprite 资源无法生成或加载: " + spAssetName);
             }
+            catch (Exception ex) { Psd2UIFormConverter.Instance.RecordGenerationIssue(layerNode, "sprite_binding_failed", ex.Message); }
             return null;
         }
         #region 9-Slice Border Detection
@@ -1508,11 +1534,6 @@ namespace UGF.EditorTools.Psd2UGUI
             // alpha == 0 as content when alphaThreshold was left at its default value.
             RectInt contentRect = FindContentBounds(pixels, width, height, effectiveAlphaThreshold);
 
-            int contentLeft = contentRect.xMin;
-            int contentRight = contentRect.xMax - 1;
-            int contentBottom = contentRect.yMin;
-            int contentTop = contentRect.yMax - 1;
-
             RangeInt horizontalStretch = FindAxisStretchBand(
                 pixels, width, contentRect,
                 true, effectiveAlphaThreshold, effectiveVariationTolerance);
@@ -1522,17 +1543,20 @@ namespace UGF.EditorTools.Psd2UGUI
             bool hasHorizontalStretch = horizontalStretch.length > 1;
             bool hasVerticalStretch = verticalStretch.length > 1;
 
+            // spriteBorder 以贴图边缘为原点，透明留白属于边框区，不能按内容包围盒起算。
+            int stretchEndX = horizontalStretch.start + horizontalStretch.length - 1;
+            int stretchEndY = verticalStretch.start + verticalStretch.length - 1;
             int leftBorder = hasHorizontalStretch
-                ? Mathf.Clamp(horizontalStretch.start - contentLeft, 0, Mathf.Max(0, width - 1))
+                ? Mathf.Clamp(horizontalStretch.start, 0, Mathf.Max(0, width - 1))
                 : 0;
             int rightBorder = hasHorizontalStretch
-                ? Mathf.Clamp(contentRight - (horizontalStretch.start + horizontalStretch.length - 1), 0, Mathf.Max(0, width - 1))
+                ? Mathf.Clamp(width - 1 - stretchEndX, 0, Mathf.Max(0, width - 1))
                 : 0;
             int bottomBorder = hasVerticalStretch
-                ? Mathf.Clamp(verticalStretch.start - contentBottom, 0, Mathf.Max(0, height - 1))
+                ? Mathf.Clamp(verticalStretch.start, 0, Mathf.Max(0, height - 1))
                 : 0;
             int topBorder = hasVerticalStretch
-                ? Mathf.Clamp(contentTop - (verticalStretch.start + verticalStretch.length - 1), 0, Mathf.Max(0, height - 1))
+                ? Mathf.Clamp(height - 1 - stretchEndY, 0, Mathf.Max(0, height - 1))
                 : 0;
 
             return new Vector4(leftBorder, bottomBorder, rightBorder, topBorder);
@@ -1755,6 +1779,85 @@ namespace UGF.EditorTools.Psd2UGUI
             return new RectInt(minX, minY, maxX - minX + 1, maxY - minY + 1);
         }
         #endregion
+
+        private struct CanonicalTextRun
+        {
+            public int Start;
+            public int Length;
+            public int SourceStyleIndex;
+            public bool IsWhitespace;
+        }
+
+        private struct CanonicalTextData
+        {
+            public string Text;
+            public CanonicalTextRun[] Runs;
+            public int RunCount;
+            public int BaseStyleIndex;
+        }
+
+        private struct UGUITextRunStyle
+        {
+            public int FontSize;
+            public Color32 Color;
+            public FontStyle FontStyle;
+        }
+
+        private struct UGUITextRenderRun
+        {
+            public int Start;
+            public int Length;
+            public UGUITextRunStyle Style;
+        }
+
+        private struct UGUITextRenderPlan
+        {
+            public string Text;
+            public UGUITextRenderRun[] Runs;
+            public int RunCount;
+            public string BaseFontName;
+            public UGUITextRunStyle ComponentStyle;
+            public bool HasInlineTags;
+        }
+
+        private struct TMPTextRunStyle
+        {
+            public TMP_FontAsset Font;
+            public Material Material;
+            public float FontSize;
+            public Color32 Color;
+            public float CharacterSpacing;
+            public float BaselineShift;
+            public float HorizontalScale;
+            public FontStyles FontStyle;
+            public PsdTextCapitalization Capitalization;
+            public bool NoBreak;
+        }
+
+        private struct TMPTextRenderRun
+        {
+            public int Start;
+            public int Length;
+            public TMPTextRunStyle Style;
+        }
+
+        private struct TMPTextRenderPlan
+        {
+            public string Text;
+            public TMPTextRenderRun[] Runs;
+            public int RunCount;
+            public TMPTextRunStyle ComponentStyle;
+            public FontStyles ComponentFontStyle;
+            public float ComponentCharacterSpacing;
+            public bool EmitFontStyleTags;
+            public bool EmitCharacterSpacingTags;
+            public bool EmitRunColors;
+            public bool HasInlineTags;
+            public bool HasParagraphTags;
+
+            public bool HasRichText => HasInlineTags || HasParagraphTags;
+        }
+
         /// <summary>
         /// Apply parsed PSD text data to a legacy uGUI Text component.
         /// </summary>
@@ -1763,26 +1866,38 @@ namespace UGF.EditorTools.Psd2UGUI
         internal static TextLayerInfo SetTextStyle(PsdLayerNode txtLayer, UnityEngine.UI.Text text)
         {
             if (text == null) return default;
+            PsdGeneratedDrawOrder.Register(txtLayer, text);
             text.gameObject.SetActive(txtLayer != null);
             if (txtLayer != null && txtLayer.ParseTextLayerInfo(out var textInfo))
             {
-                var tFont = FindFontAsset(textInfo.FontName);
+                CanonicalTextData canonical = BuildCanonicalTextData(in textInfo);
+                UGUITextRenderPlan plan = BuildUGUITextRenderPlan(in textInfo, in canonical);
+                var tFont = FindFontAsset(plan.BaseFontName);
                 if (tFont != null) text.font = tFont;
-                bool useRichText = RequiresUGUITextRichText(in textInfo);
-                text.text = useRichText ? BuildUGUITextRichText(in textInfo) : textInfo.Text;
-                text.supportRichText = useRichText;
-                text.fontSize = Mathf.Max(1, Mathf.RoundToInt(textInfo.FontSize));
-                text.fontStyle = useRichText ? FontStyle.Normal : textInfo.FontStyle;
-                text.color = useRichText ? Color.white : textInfo.Color;
+                text.text = plan.HasInlineTags ? SerializeUGUIText(in plan) : plan.Text;
+                text.supportRichText = plan.HasInlineTags;
+                text.fontSize = plan.ComponentStyle.FontSize;
+                text.fontStyle = plan.ComponentStyle.FontStyle;
+                text.color = plan.ComponentStyle.Color;
                 text.resizeTextForBestFit = false;
                 text.lineSpacing = ConvertPsdLeadingToUGUILineSpacing(text, in textInfo);
                 text.alignment = ConvertPsdAlignment(text.alignment, textInfo.Justification);
+                if (txtLayer.HasAuthoredAiText) text.alignment = txtLayer.AiTextAlignment;
                 bool isRotated = txtLayer.TryGetTextUnityRotation(out var rotation)
                     && Mathf.Abs(rotation.z) > 0.001f;
                 text.alignByGeometry = !textInfo.IsParagraphText && !isRotated;
                 text.horizontalOverflow = textInfo.IsParagraphText ? HorizontalWrapMode.Wrap : HorizontalWrapMode.Overflow;
                 text.verticalOverflow = VerticalWrapMode.Overflow;
                 ApplyUGUITextEffects(text, in textInfo);
+                if (txtLayer.IsAiTarget)
+                {
+                    var group = text.GetComponent<CanvasGroup>();
+                    if (group != null || txtLayer.AiTextAncestorOpacity < 1f)
+                    {
+                        if (group == null) group = text.gameObject.AddComponent<CanvasGroup>();
+                        group.alpha = txtLayer.AiTextAncestorOpacity;
+                    }
+                }
                 return textInfo;
             }
             return default;
@@ -1795,11 +1910,16 @@ namespace UGF.EditorTools.Psd2UGUI
         internal static void SetTextStyle(PsdLayerNode txtLayer, TextMeshProUGUI text)
         {
             if (text == null) return;
+            PsdGeneratedDrawOrder.Register(txtLayer, text);
             text.gameObject.SetActive(txtLayer != null);
             if (txtLayer != null && txtLayer.ParseTextLayerInfo(out var textInfo))
             {
+                CanonicalTextData canonical = BuildCanonicalTextData(in textInfo);
                 var runFonts = ResolveTMPFontAssets(text, in textInfo);
-                var tFont = runFonts.Length > 0 ? runFonts[0] : text.font;
+                int baseStyleIndex = canonical.BaseStyleIndex;
+                var tFont = baseStyleIndex >= 0 && baseStyleIndex < runFonts.Length
+                    ? runFonts[baseStyleIndex]
+                    : text.font;
                 if (tFont != null)
                 {
                     var fontMaterial = EnsureTMPFontAssetResources(tFont);
@@ -1810,29 +1930,60 @@ namespace UGF.EditorTools.Psd2UGUI
                     }
                 }
 
-                bool useRichText = RequiresTMPRichText(in textInfo);
                 Vector2 effectSize = txtLayer.LayerRect.size;
                 TMPGradientOutput gradientOutput = ResolveTMPGradientOutput(in textInfo);
                 bool useGradientFill = gradientOutput != TMPGradientOutput.None;
-                text.fontSize = textInfo.FontSize;
-                text.fontStyle = useRichText ? FontStyles.Normal : textInfo.TMPFontStyle;
-                text.characterSpacing = useRichText ? 0f : textInfo.CharacterSpacing;
-                text.lineSpacing = useRichText ? 0f : ConvertPsdLeadingToTMPLineSpacing(text, in textInfo);
+                TextStyleRunInfo baseSourceStyle = baseStyleIndex >= 0
+                    ? textInfo.StyleRuns[baseStyleIndex]
+                    : textInfo.StyleRuns[0];
+                text.fontSize = QuantizeTMPValue(baseSourceStyle.FontSize);
+                text.color = useGradientFill ? Color.white : (Color)(Color32)baseSourceStyle.Color;
+                ApplyTMPTextEffects(text, effectSize, in textInfo);
+                var runMaterials = ResolveTMPRunEffectMaterials(runFonts, effectSize, in textInfo);
+                TMPTextRenderPlan plan = BuildTMPTextRenderPlan(
+                    in textInfo,
+                    in canonical,
+                    runFonts,
+                    runMaterials,
+                    !useGradientFill);
+
+                if (plan.ComponentStyle.Font != null)
+                    text.font = plan.ComponentStyle.Font;
+                if (plan.ComponentStyle.Material != null
+                    && text.fontSharedMaterial != plan.ComponentStyle.Material)
+                {
+                    text.fontSharedMaterial = plan.ComponentStyle.Material;
+                    text.UpdateMeshPadding();
+                    text.SetMaterialDirty();
+                }
+                text.fontSize = plan.ComponentStyle.FontSize;
+                text.fontStyle = plan.ComponentFontStyle;
+                text.characterSpacing = plan.ComponentCharacterSpacing;
+                bool serializedTextHasLineHeightTags = textInfo.ParagraphRuns != null
+                    && textInfo.ParagraphRuns.Length > 0
+                    && plan.HasRichText;
+                text.lineSpacing = serializedTextHasLineHeightTags
+                    ? 0f
+                    : ConvertPsdLeadingToTMPLineSpacing(text, in textInfo);
                 text.paragraphSpacing = 0f;
+#if UNITY_6000_3_OR_NEWER
+                text.fontFeatures = ResolveTMPAutoKerning(in textInfo)
+                    ? new List<OTL_FeatureTag> { OTL_FeatureTag.kern }
+                    : new List<OTL_FeatureTag>();
+#else
                 text.enableKerning = ResolveTMPAutoKerning(in textInfo);
+#endif
                 text.horizontalAlignment = ConvertPsdAlignment(textInfo.Justification);
                 text.enableAutoSizing = false;
                 SetTMPTextWrapping(text, textInfo.IsParagraphText);
                 text.overflowMode = TextOverflowModes.Overflow;
                 text.margin = ResolveTMPParagraphMargins(in textInfo);
                 text.extraPadding = textInfo.HasOutline || textInfo.HasShadow || textInfo.HasGlow || textInfo.HasBevel;
-                text.color = useRichText || useGradientFill ? Color.white : textInfo.Color;
-                ApplyTMPTextEffects(text, effectSize, in textInfo);
-                var runMaterials = ResolveTMPRunEffectMaterials(runFonts, effectSize, in textInfo);
-                text.richText = useRichText;
-                text.text = useRichText
-                    ? BuildTMPRichText(in textInfo, runFonts, runMaterials, !useGradientFill)
-                    : textInfo.Text ?? string.Empty;
+                text.color = plan.ComponentStyle.Color;
+                text.richText = plan.HasRichText;
+                text.text = plan.HasRichText
+                    ? SerializeTMPText(in textInfo, in plan)
+                    : plan.Text;
                 ApplyTMPTextGradientMapping(text, effectSize, gradientOutput, in textInfo);
                 text.ForceMeshUpdate();
             }
@@ -1841,7 +1992,7 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             var runs = textInfo.StyleRuns;
             if (runs == null || runs.Length == 0)
-                return new TMP_FontAsset[0];
+                return Array.Empty<TMP_FontAsset>();
 
             var fonts = new TMP_FontAsset[runs.Length];
             TMP_FontAsset baseFont = FindTMPFontAsset(runs[0].FontName) ?? text.font;
@@ -1928,111 +2079,231 @@ namespace UGF.EditorTools.Psd2UGUI
             }
         }
 
-        internal static bool RequiresTMPRichText(in TextLayerInfo textInfo)
+        private static CanonicalTextData BuildCanonicalTextData(in TextLayerInfo textInfo)
         {
-            string sourceText = textInfo.Text ?? string.Empty;
-            var styleRuns = textInfo.StyleRuns;
-            int baseStyleIndex = -1;
-            if (styleRuns != null && sourceText.Length > 0)
+            string text = textInfo.Text ?? string.Empty;
+            var sourceRuns = textInfo.StyleRuns;
+            if (text.Length == 0 || sourceRuns == null || sourceRuns.Length == 0)
             {
-                for (int i = 0; i < styleRuns.Length; i++)
+                return new CanonicalTextData
                 {
-                    var style = styleRuns[i];
-                    if (!ContainsVisibleCharacters(sourceText, style.Start, style.Length))
+                    Text = text,
+                    Runs = Array.Empty<CanonicalTextRun>(),
+                    RunCount = 0,
+                    BaseStyleIndex = sourceRuns != null && sourceRuns.Length > 0 ? 0 : -1,
+                };
+            }
+
+            var runs = new CanonicalTextRun[sourceRuns.Length * 2 + 1];
+            int count = 0;
+            int offset = 0;
+            int baseStyleIndex = -1;
+            for (int i = 0; i < sourceRuns.Length && offset < text.Length; i++)
+            {
+                var sourceRun = sourceRuns[i];
+                int start = Mathf.Clamp(sourceRun.Start, offset, text.Length);
+                if (start > offset)
+                {
+                    int gapStyleIndex = i > 0 ? i - 1 : 0;
+                    AddCanonicalTextRun(text, runs, ref count, offset, start, gapStyleIndex, ref baseStyleIndex);
+                    offset = start;
+                }
+
+                int end = Mathf.Clamp(sourceRun.Start + sourceRun.Length, start, text.Length);
+                if (end > start)
+                {
+                    AddCanonicalTextRun(text, runs, ref count, start, end, i, ref baseStyleIndex);
+                    offset = end;
+                }
+            }
+
+            if (offset < text.Length)
+            {
+                AddCanonicalTextRun(
+                    text,
+                    runs,
+                    ref count,
+                    offset,
+                    text.Length,
+                    sourceRuns.Length - 1,
+                    ref baseStyleIndex);
+            }
+
+            if (baseStyleIndex < 0 && count > 0)
+                baseStyleIndex = runs[0].SourceStyleIndex;
+            return new CanonicalTextData
+            {
+                Text = text,
+                Runs = runs,
+                RunCount = count,
+                BaseStyleIndex = baseStyleIndex,
+            };
+        }
+
+        private static void AddCanonicalTextRun(
+            string text,
+            CanonicalTextRun[] runs,
+            ref int count,
+            int start,
+            int end,
+            int sourceStyleIndex,
+            ref int baseStyleIndex)
+        {
+            bool isWhitespace = IsWhitespaceRange(text, start, end - start);
+            runs[count++] = new CanonicalTextRun
+            {
+                Start = start,
+                Length = end - start,
+                SourceStyleIndex = sourceStyleIndex,
+                IsWhitespace = isWhitespace,
+            };
+            if (!isWhitespace && baseStyleIndex < 0)
+                baseStyleIndex = sourceStyleIndex;
+        }
+
+        private static bool IsWhitespaceRange(string text, int start, int length)
+        {
+            int end = start + length;
+            for (int i = start; i < end; i++)
+            {
+                if (!char.IsWhiteSpace(text[i]))
+                    return false;
+            }
+            return true;
+        }
+
+        private static UGUITextRenderPlan BuildUGUITextRenderPlan(
+            in TextLayerInfo textInfo,
+            in CanonicalTextData canonical)
+        {
+            var sourceRuns = textInfo.StyleRuns;
+            int baseStyleIndex = canonical.BaseStyleIndex >= 0 ? canonical.BaseStyleIndex : 0;
+            UGUITextRunStyle baseStyle = ProjectUGUITextStyle(in sourceRuns[baseStyleIndex]);
+            var projectedRuns = new UGUITextRenderRun[canonical.RunCount];
+
+            int baseRunIndex = 0;
+            bool foundBaseRun = false;
+            for (int i = 0; i < canonical.RunCount; i++)
+            {
+                CanonicalTextRun canonicalRun = canonical.Runs[i];
+                projectedRuns[i] = new UGUITextRenderRun
+                {
+                    Start = canonicalRun.Start,
+                    Length = canonicalRun.Length,
+                    Style = ProjectUGUITextStyle(in sourceRuns[canonicalRun.SourceStyleIndex]),
+                };
+                if (!foundBaseRun && !canonicalRun.IsWhitespace)
+                {
+                    baseRunIndex = i;
+                    foundBaseRun = true;
+                }
+            }
+
+            for (int i = 0; i < canonical.RunCount; i++)
+            {
+                if (!canonical.Runs[i].IsWhitespace)
+                    continue;
+
+                UGUITextRunStyle whitespaceStyle = projectedRuns[i].Style;
+                if (i > 0 && AreUGUITextLayoutStylesEqual(in projectedRuns[i - 1].Style, in whitespaceStyle))
+                {
+                    whitespaceStyle.Color = projectedRuns[i - 1].Style.Color;
+                    projectedRuns[i].Style = whitespaceStyle;
+                    continue;
+                }
+
+                for (int j = i + 1; j < canonical.RunCount; j++)
+                {
+                    if (!AreUGUITextLayoutStylesEqual(in whitespaceStyle, in projectedRuns[j].Style))
+                        break;
+                    if (canonical.Runs[j].IsWhitespace)
                         continue;
 
-                    if (baseStyleIndex < 0)
+                    whitespaceStyle.Color = projectedRuns[j].Style.Color;
+                    projectedRuns[i].Style = whitespaceStyle;
+                    break;
+                }
+            }
+
+            baseStyle = canonical.RunCount > 0 ? projectedRuns[baseRunIndex].Style : baseStyle;
+            bool allBold = canonical.RunCount > 0;
+            bool allItalic = canonical.RunCount > 0;
+            for (int i = 0; i < canonical.RunCount; i++)
+            {
+                FontStyle style = projectedRuns[i].Style.FontStyle;
+                allBold &= style == FontStyle.Bold || style == FontStyle.BoldAndItalic;
+                allItalic &= style == FontStyle.Italic || style == FontStyle.BoldAndItalic;
+            }
+            baseStyle.FontStyle = allBold
+                ? (allItalic ? FontStyle.BoldAndItalic : FontStyle.Bold)
+                : (allItalic ? FontStyle.Italic : FontStyle.Normal);
+
+            int runCount = MergeUGUITextRuns(projectedRuns, canonical.RunCount);
+            bool hasInlineTags = false;
+            for (int i = 0; i < runCount; i++)
+            {
+                if (!AreUGUITextStylesEqual(in baseStyle, in projectedRuns[i].Style))
+                {
+                    hasInlineTags = true;
+                    break;
+                }
+            }
+
+            if (ContainsUGUIRichTextTag(canonical.Text) && hasInlineTags)
+            {
+                // 文本里有字面 <b>/<color> 时 uGUI 只能整段按纯文本走，分段样式确实会丢，说清楚别静默。
+                hasInlineTags = false;
+                string preview = canonical.Text.Length > 60 ? canonical.Text.Substring(0, 60) + "…" : canonical.Text;
+                Debug.LogWarning($"uGUI Text 图层文本包含字面富文本标签，已按纯文本导出，该图层的分段字号/颜色/加粗未应用: {preview}");
+            }
+            char[] capitalized = null;
+            for (int i = 0; i < canonical.RunCount; i++)
+            {
+                var run = canonical.Runs[i];
+                if ((sourceRuns[run.SourceStyleIndex].TMPFontStyle & TMPro.FontStyles.UpperCase) == 0) continue;
+                if (capitalized == null) capitalized = canonical.Text.ToCharArray();
+                for (int c = run.Start; c < run.Start + run.Length; c++) capitalized[c] = char.ToUpperInvariant(capitalized[c]);
+            }
+            return new UGUITextRenderPlan
+            {
+                Text = capitalized == null ? canonical.Text : new string(capitalized),
+                Runs = projectedRuns,
+                RunCount = runCount,
+                BaseFontName = sourceRuns[baseStyleIndex].FontName,
+                ComponentStyle = baseStyle,
+                HasInlineTags = hasInlineTags,
+            };
+        }
+
+        private static UGUITextRunStyle ProjectUGUITextStyle(in TextStyleRunInfo source)
+        {
+            return new UGUITextRunStyle
+            {
+                FontSize = Mathf.Max(1, Mathf.RoundToInt(source.FontSize)),
+                Color = source.Color,
+                FontStyle = source.FontStyle,
+            };
+        }
+
+        private static int MergeUGUITextRuns(UGUITextRenderRun[] runs, int count)
+        {
+            int writeIndex = 0;
+            for (int i = 0; i < count; i++)
+            {
+                UGUITextRenderRun run = runs[i];
+                if (writeIndex > 0)
+                {
+                    ref UGUITextRenderRun previous = ref runs[writeIndex - 1];
+                    if (previous.Start + previous.Length == run.Start
+                        && AreUGUITextStylesEqual(in previous.Style, in run.Style))
                     {
-                        baseStyleIndex = i;
+                        previous.Length += run.Length;
                         continue;
                     }
-
-                    if (!AreTMPRichTextStylesEqual(in styleRuns[baseStyleIndex], in style))
-                        return true;
                 }
+                runs[writeIndex++] = run;
             }
-
-            var paragraphRuns = textInfo.ParagraphRuns;
-            if (paragraphRuns == null || sourceText.Length == 0)
-                return false;
-
-            int baseParagraphIndex = -1;
-            for (int i = 0; i < paragraphRuns.Length; i++)
-            {
-                var paragraph = paragraphRuns[i];
-                if (!OverlapsText(sourceText.Length, paragraph.Start, paragraph.Length))
-                    continue;
-
-                if (baseParagraphIndex < 0)
-                {
-                    baseParagraphIndex = i;
-                    continue;
-                }
-
-                if (!AreTMPRichTextParagraphsEqual(in paragraphRuns[baseParagraphIndex], in paragraph))
-                    return true;
-            }
-            return false;
-        }
-
-        private static bool ContainsVisibleCharacters(string text, int start, int length)
-        {
-            int rangeStart = Mathf.Clamp(start, 0, text.Length);
-            int rangeEnd = Mathf.Clamp(start + length, rangeStart, text.Length);
-            for (int i = rangeStart; i < rangeEnd; i++)
-            {
-                char character = text[i];
-                if (character != '\r' && character != '\n')
-                    return true;
-            }
-            return false;
-        }
-
-        private static bool OverlapsText(int textLength, int start, int length)
-        {
-            return length > 0 && start < textLength && start + length > 0;
-        }
-
-        private static bool AreTMPRichTextStylesEqual(
-            in TextStyleRunInfo left,
-            in TextStyleRunInfo right)
-        {
-            return string.Equals(left.FontName, right.FontName, StringComparison.Ordinal)
-                && Mathf.Abs(left.FontSize - right.FontSize) <= 0.001f
-                && left.Color == right.Color
-                && left.TMPFontStyle == right.TMPFontStyle
-                && Mathf.Abs(left.CharacterSpacing - right.CharacterSpacing) <= 0.001f
-                && left.IsAutoLineSpacing == right.IsAutoLineSpacing
-                && (left.IsAutoLineSpacing || Mathf.Abs(left.LineSpacing - right.LineSpacing) <= 0.001f)
-                && Mathf.Abs(left.BaselineShift - right.BaselineShift) <= 0.001f
-                && Mathf.Abs(left.HorizontalScale - right.HorizontalScale) <= 0.001f
-                && left.NoBreak == right.NoBreak;
-        }
-
-        internal static bool RequiresUGUITextRichText(in TextLayerInfo textInfo)
-        {
-            string sourceText = textInfo.Text ?? string.Empty;
-            var runs = textInfo.StyleRuns;
-            if (runs == null || sourceText.Length == 0 || ContainsUGUIRichTextTag(sourceText))
-                return false;
-
-            int baseStyleIndex = -1;
-            for (int i = 0; i < runs.Length; i++)
-            {
-                var run = runs[i];
-                if (!ContainsVisibleCharacters(sourceText, run.Start, run.Length))
-                    continue;
-
-                if (baseStyleIndex < 0)
-                {
-                    baseStyleIndex = i;
-                    continue;
-                }
-
-                if (!AreUGUITextStylesEqual(in runs[baseStyleIndex], in run))
-                    return true;
-            }
-            return false;
+            return writeIndex;
         }
 
         private static bool ContainsUGUIRichTextTag(string text)
@@ -2091,73 +2362,144 @@ namespace UGF.EditorTools.Psd2UGUI
         }
 
         private static bool AreUGUITextStylesEqual(
-            in TextStyleRunInfo left,
-            in TextStyleRunInfo right)
+            in UGUITextRunStyle left,
+            in UGUITextRunStyle right)
         {
-            return Mathf.Abs(left.FontSize - right.FontSize) <= 0.001f
-                && left.Color == right.Color
+            return left.FontSize == right.FontSize
+                && AreColorsEqual(left.Color, right.Color)
                 && left.FontStyle == right.FontStyle;
         }
 
-        internal static string BuildUGUITextRichText(in TextLayerInfo textInfo)
+        private static bool AreUGUITextLayoutStylesEqual(
+            in UGUITextRunStyle left,
+            in UGUITextRunStyle right)
         {
-            string sourceText = textInfo.Text ?? string.Empty;
-            var runs = textInfo.StyleRuns;
-            if (sourceText.Length == 0 || runs == null || runs.Length == 0)
-                return sourceText;
+            return left.FontSize == right.FontSize
+                && left.FontStyle == right.FontStyle;
+        }
 
-            var builder = new StringBuilder(sourceText.Length + runs.Length * 48);
-            int offset = 0;
-            for (int i = 0; i < runs.Length && offset < sourceText.Length; i++)
+        private static bool AreColorsEqual(Color32 left, Color32 right)
+        {
+            return left.r == right.r
+                && left.g == right.g
+                && left.b == right.b
+                && left.a == right.a;
+        }
+
+        private enum UGUITextTagKind : byte
+        {
+            Size,
+            Color,
+            Bold,
+            Italic,
+        }
+
+        private struct UGUITextTag
+        {
+            public UGUITextTagKind Kind;
+            public int FontSize;
+            public Color32 Color;
+        }
+
+        private static string SerializeUGUIText(in UGUITextRenderPlan plan)
+        {
+            var builder = new StringBuilder(plan.Text.Length + plan.RunCount * 32);
+            var currentTags = new UGUITextTag[4];
+            var nextTags = new UGUITextTag[4];
+            int currentCount = 0;
+            for (int i = 0; i < plan.RunCount; i++)
             {
-                var run = runs[i];
-                int start = Mathf.Clamp(run.Start, offset, sourceText.Length);
-                int end = Mathf.Clamp(run.Start + run.Length, start, sourceText.Length);
-                if (start > offset)
-                    builder.Append(sourceText, offset, start - offset);
-                if (end > start)
+                UGUITextRenderRun run = plan.Runs[i];
+                int nextCount = FillUGUITextTags(in run.Style, in plan.ComponentStyle, nextTags);
+                int commonCount = 0;
+                while (commonCount < currentCount
+                    && commonCount < nextCount
+                    && AreUGUITextTagsEqual(in currentTags[commonCount], in nextTags[commonCount]))
                 {
-                    AppendUGUITextStyleOpening(builder, in run);
-                    builder.Append(sourceText, start, end - start);
-                    AppendUGUITextStyleClosing(builder, in run);
-                    offset = end;
+                    commonCount++;
                 }
-            }
+                for (int j = currentCount - 1; j >= commonCount; j--)
+                    AppendUGUITextTagClosing(builder, currentTags[j].Kind);
+                for (int j = commonCount; j < nextCount; j++)
+                    AppendUGUITextTagOpening(builder, in nextTags[j]);
 
-            if (offset < sourceText.Length)
-                builder.Append(sourceText, offset, sourceText.Length - offset);
+                builder.Append(plan.Text, run.Start, run.Length);
+                var swap = currentTags;
+                currentTags = nextTags;
+                nextTags = swap;
+                currentCount = nextCount;
+            }
+            for (int i = currentCount - 1; i >= 0; i--)
+                AppendUGUITextTagClosing(builder, currentTags[i].Kind);
             return builder.ToString();
         }
 
-        private static void AppendUGUITextStyleOpening(StringBuilder builder, in TextStyleRunInfo run)
+        private static int FillUGUITextTags(
+            in UGUITextRunStyle style,
+            in UGUITextRunStyle componentStyle,
+            UGUITextTag[] tags)
         {
-            builder.Append("<color=#").Append(ColorUtility.ToHtmlStringRGBA(run.Color)).Append('>');
-            builder.Append("<size=").Append(Mathf.Max(1, Mathf.RoundToInt(run.FontSize))).Append('>');
-            if (run.FontStyle == FontStyle.Bold || run.FontStyle == FontStyle.BoldAndItalic)
-                builder.Append("<b>");
-            if (run.FontStyle == FontStyle.Italic || run.FontStyle == FontStyle.BoldAndItalic)
-                builder.Append("<i>");
+            int count = 0;
+            if (style.FontSize != componentStyle.FontSize)
+                tags[count++] = new UGUITextTag { Kind = UGUITextTagKind.Size, FontSize = style.FontSize };
+            if (!AreColorsEqual(style.Color, componentStyle.Color))
+                tags[count++] = new UGUITextTag { Kind = UGUITextTagKind.Color, Color = style.Color };
+            bool componentBold = componentStyle.FontStyle == FontStyle.Bold
+                || componentStyle.FontStyle == FontStyle.BoldAndItalic;
+            bool componentItalic = componentStyle.FontStyle == FontStyle.Italic
+                || componentStyle.FontStyle == FontStyle.BoldAndItalic;
+            bool styleBold = style.FontStyle == FontStyle.Bold || style.FontStyle == FontStyle.BoldAndItalic;
+            bool styleItalic = style.FontStyle == FontStyle.Italic || style.FontStyle == FontStyle.BoldAndItalic;
+            if (styleBold && !componentBold)
+                tags[count++] = new UGUITextTag { Kind = UGUITextTagKind.Bold };
+            if (styleItalic && !componentItalic)
+                tags[count++] = new UGUITextTag { Kind = UGUITextTagKind.Italic };
+            return count;
         }
 
-        private static void AppendUGUITextStyleClosing(StringBuilder builder, in TextStyleRunInfo run)
+        private static bool AreUGUITextTagsEqual(in UGUITextTag left, in UGUITextTag right)
         {
-            if (run.FontStyle == FontStyle.Italic || run.FontStyle == FontStyle.BoldAndItalic)
-                builder.Append("</i>");
-            if (run.FontStyle == FontStyle.Bold || run.FontStyle == FontStyle.BoldAndItalic)
-                builder.Append("</b>");
-            builder.Append("</size></color>");
+            return left.Kind == right.Kind
+                && left.FontSize == right.FontSize
+                && AreColorsEqual(left.Color, right.Color);
         }
 
-        private static bool AreTMPRichTextParagraphsEqual(
-            in TextParagraphRunInfo left,
-            in TextParagraphRunInfo right)
+        private static void AppendUGUITextTagOpening(StringBuilder builder, in UGUITextTag tag)
         {
-            return left.Justification == right.Justification
-                && Mathf.Abs(left.FirstLineIndent - right.FirstLineIndent) <= 0.001f
-                && Mathf.Abs(left.StartIndent - right.StartIndent) <= 0.001f
-                && Mathf.Abs(left.EndIndent - right.EndIndent) <= 0.001f
-                && Mathf.Abs(left.SpaceBefore - right.SpaceBefore) <= 0.001f
-                && Mathf.Abs(left.SpaceAfter - right.SpaceAfter) <= 0.001f;
+            switch (tag.Kind)
+            {
+                case UGUITextTagKind.Size:
+                    builder.Append("<size=").Append(tag.FontSize).Append('>');
+                    break;
+                case UGUITextTagKind.Color:
+                    builder.Append("<color=#").Append(ColorUtility.ToHtmlStringRGBA(tag.Color)).Append('>');
+                    break;
+                case UGUITextTagKind.Bold:
+                    builder.Append("<b>");
+                    break;
+                case UGUITextTagKind.Italic:
+                    builder.Append("<i>");
+                    break;
+            }
+        }
+
+        private static void AppendUGUITextTagClosing(StringBuilder builder, UGUITextTagKind kind)
+        {
+            switch (kind)
+            {
+                case UGUITextTagKind.Size:
+                    builder.Append("</size>");
+                    break;
+                case UGUITextTagKind.Color:
+                    builder.Append("</color>");
+                    break;
+                case UGUITextTagKind.Bold:
+                    builder.Append("</b>");
+                    break;
+                case UGUITextTagKind.Italic:
+                    builder.Append("</i>");
+                    break;
+            }
         }
 
         internal static bool ResolveTMPAutoKerning(in TextLayerInfo textInfo)
@@ -2175,80 +2517,350 @@ namespace UGF.EditorTools.Psd2UGUI
             return value;
         }
 
-        internal static string BuildTMPRichText(
+        private static TMPTextRenderPlan BuildTMPTextRenderPlan(
             in TextLayerInfo textInfo,
+            in CanonicalTextData canonical,
             TMP_FontAsset[] runFonts,
             Material[] runMaterials,
             bool emitRunColors)
         {
-            string sourceText = textInfo.Text ?? string.Empty;
-            if (sourceText.Length == 0)
-                return string.Empty;
+            var sourceRuns = textInfo.StyleRuns;
+            int baseStyleIndex = canonical.BaseStyleIndex >= 0 ? canonical.BaseStyleIndex : 0;
+            TMPTextRunStyle baseStyle = ProjectTMPTextStyle(
+                in sourceRuns[baseStyleIndex],
+                baseStyleIndex,
+                runFonts,
+                runMaterials,
+                emitRunColors);
+            var projectedRuns = new TMPTextRenderRun[canonical.RunCount];
+            int baseRunIndex = 0;
+            bool foundBaseRun = false;
+            for (int i = 0; i < canonical.RunCount; i++)
+            {
+                CanonicalTextRun canonicalRun = canonical.Runs[i];
+                projectedRuns[i] = new TMPTextRenderRun
+                {
+                    Start = canonicalRun.Start,
+                    Length = canonicalRun.Length,
+                    Style = ProjectTMPTextStyle(
+                        in sourceRuns[canonicalRun.SourceStyleIndex],
+                        canonicalRun.SourceStyleIndex,
+                        runFonts,
+                        runMaterials,
+                        emitRunColors),
+                };
+                if (!foundBaseRun && !canonicalRun.IsWhitespace)
+                {
+                    baseRunIndex = i;
+                    foundBaseRun = true;
+                }
+            }
 
-            var builder = new StringBuilder(sourceText.Length + (textInfo.StyleRuns.Length * 128));
-            var paragraphRuns = textInfo.ParagraphRuns;
-            int styleIndex = 0;
+            for (int i = 0; i < canonical.RunCount; i++)
+            {
+                if (!canonical.Runs[i].IsWhitespace || !CanFoldTMPWhitespaceColor(in projectedRuns[i].Style))
+                    continue;
+
+                TMPTextRunStyle whitespaceStyle = projectedRuns[i].Style;
+                if (i > 0 && AreTMPTextLayoutStylesEqual(in projectedRuns[i - 1].Style, in whitespaceStyle))
+                {
+                    whitespaceStyle.Color = projectedRuns[i - 1].Style.Color;
+                    projectedRuns[i].Style = whitespaceStyle;
+                    continue;
+                }
+
+                for (int j = i + 1; j < canonical.RunCount; j++)
+                {
+                    if (!AreTMPTextLayoutStylesEqual(in whitespaceStyle, in projectedRuns[j].Style))
+                        break;
+                    if (canonical.Runs[j].IsWhitespace)
+                        continue;
+
+                    whitespaceStyle.Color = projectedRuns[j].Style.Color;
+                    projectedRuns[i].Style = whitespaceStyle;
+                    break;
+                }
+            }
+
+            baseStyle = canonical.RunCount > 0 ? projectedRuns[baseRunIndex].Style : baseStyle;
+            bool uniformCharacterSpacing = true;
+            bool uniformFontStyle = true;
+            for (int i = 0; i < canonical.RunCount; i++)
+            {
+                TMPTextRunStyle style = projectedRuns[i].Style;
+                uniformCharacterSpacing &= style.CharacterSpacing == baseStyle.CharacterSpacing;
+                uniformFontStyle &= style.FontStyle == baseStyle.FontStyle
+                    && style.Capitalization == baseStyle.Capitalization;
+            }
+
+            int runCount = MergeTMPTextRuns(projectedRuns, canonical.RunCount);
+            var plan = new TMPTextRenderPlan
+            {
+                Text = canonical.Text,
+                Runs = projectedRuns,
+                RunCount = runCount,
+                ComponentStyle = baseStyle,
+                ComponentFontStyle = uniformFontStyle
+                    ? GetTMPComponentFontStyle(in baseStyle)
+                    : FontStyles.Normal,
+                ComponentCharacterSpacing = uniformCharacterSpacing ? baseStyle.CharacterSpacing : 0f,
+                EmitFontStyleTags = !uniformFontStyle,
+                EmitCharacterSpacingTags = !uniformCharacterSpacing,
+                EmitRunColors = emitRunColors,
+                HasParagraphTags = HasTMPParagraphTags(in textInfo),
+            };
+
+            for (int i = 0; i < runCount; i++)
+            {
+                if (HasTMPTextTags(in projectedRuns[i].Style, in plan))
+                {
+                    plan.HasInlineTags = true;
+                    break;
+                }
+            }
+            if (!plan.HasInlineTags && canonical.Text.IndexOf('<') >= 0)
+                plan.HasInlineTags = true;
+            return plan;
+        }
+
+        private static bool HasTMPTextTags(in TMPTextRunStyle style, in TMPTextRenderPlan plan)
+        {
+            return (style.Font != null && style.Font != plan.ComponentStyle.Font)
+                || (style.Material != null && style.Material != plan.ComponentStyle.Material)
+                || style.FontSize != plan.ComponentStyle.FontSize
+                || (plan.EmitRunColors && !AreColorsEqual(style.Color, plan.ComponentStyle.Color))
+                || (plan.EmitCharacterSpacingTags && style.CharacterSpacing != 0f)
+                || style.BaselineShift != 0f
+                || style.HorizontalScale != 1f
+                || (plan.EmitFontStyleTags
+                    && (style.FontStyle != FontStyles.Normal
+                        || style.Capitalization != PsdTextCapitalization.Normal))
+                || style.NoBreak;
+        }
+
+        private static TMPTextRunStyle ProjectTMPTextStyle(
+            in TextStyleRunInfo source,
+            int sourceStyleIndex,
+            TMP_FontAsset[] runFonts,
+            Material[] runMaterials,
+            bool emitRunColors)
+        {
+            const FontStyles inlineStyles = FontStyles.Bold
+                | FontStyles.Italic
+                | FontStyles.Underline
+                | FontStyles.Strikethrough;
+            return new TMPTextRunStyle
+            {
+                Font = sourceStyleIndex < runFonts.Length ? runFonts[sourceStyleIndex] : null,
+                Material = runMaterials != null && sourceStyleIndex < runMaterials.Length
+                    ? runMaterials[sourceStyleIndex]
+                    : null,
+                FontSize = QuantizeTMPValue(source.FontSize),
+                Color = emitRunColors ? (Color32)source.Color : (Color32)Color.white,
+                CharacterSpacing = QuantizeTMPCharacterSpacing(source.CharacterSpacing),
+                BaselineShift = QuantizeTMPValue(source.BaselineShift),
+                HorizontalScale = QuantizeTMPValue(source.HorizontalScale),
+                FontStyle = source.TMPFontStyle & inlineStyles,
+                Capitalization = source.Capitalization,
+                NoBreak = source.NoBreak,
+            };
+        }
+
+        private static float QuantizeTMPCharacterSpacing(float value)
+        {
+            return QuantizeTMPValue(QuantizeTMPValue(value * 0.01f) * 100f);
+        }
+
+        private static bool CanFoldTMPWhitespaceColor(in TMPTextRunStyle style)
+        {
+            return (style.FontStyle & (FontStyles.Underline | FontStyles.Strikethrough)) == 0;
+        }
+
+        private static bool AreTMPTextStylesEqual(in TMPTextRunStyle left, in TMPTextRunStyle right)
+        {
+            return AreTMPTextLayoutStylesEqual(in left, in right)
+                && AreColorsEqual(left.Color, right.Color);
+        }
+
+        private static bool AreTMPTextLayoutStylesEqual(in TMPTextRunStyle left, in TMPTextRunStyle right)
+        {
+            return left.Font == right.Font
+                && left.Material == right.Material
+                && left.FontSize == right.FontSize
+                && left.CharacterSpacing == right.CharacterSpacing
+                && left.BaselineShift == right.BaselineShift
+                && left.HorizontalScale == right.HorizontalScale
+                && left.FontStyle == right.FontStyle
+                && left.Capitalization == right.Capitalization
+                && left.NoBreak == right.NoBreak;
+        }
+
+        private static int MergeTMPTextRuns(TMPTextRenderRun[] runs, int count)
+        {
+            int writeIndex = 0;
+            for (int i = 0; i < count; i++)
+            {
+                TMPTextRenderRun run = runs[i];
+                if (writeIndex > 0)
+                {
+                    ref TMPTextRenderRun previous = ref runs[writeIndex - 1];
+                    if (previous.Start + previous.Length == run.Start
+                        && AreTMPTextStylesEqual(in previous.Style, in run.Style))
+                    {
+                        previous.Length += run.Length;
+                        continue;
+                    }
+                }
+                runs[writeIndex++] = run;
+            }
+            return writeIndex;
+        }
+
+        private static FontStyles GetTMPComponentFontStyle(in TMPTextRunStyle style)
+        {
+            FontStyles result = style.FontStyle;
+            if (style.Capitalization == PsdTextCapitalization.AllCaps)
+                result |= FontStyles.UpperCase;
+            else if (style.Capitalization == PsdTextCapitalization.SmallCaps)
+                result |= FontStyles.SmallCaps;
+            return result;
+        }
+
+        [Flags]
+        private enum TMPParagraphTagFlags : byte
+        {
+            None = 0,
+            Alignment = 1 << 0,
+            Margin = 1 << 1,
+            LineIndent = 1 << 2,
+            LineHeight = 1 << 3,
+        }
+
+        private static bool HasTMPParagraphTags(in TextLayerInfo textInfo)
+        {
+            string text = textInfo.Text ?? string.Empty;
+            var paragraphs = textInfo.ParagraphRuns;
+            if (text.Length == 0 || paragraphs == null)
+                return false;
+
+            int offset = 0;
+            for (int i = 0; i < paragraphs.Length && offset < text.Length; i++)
+            {
+                TextParagraphRunInfo paragraph = paragraphs[i];
+                int start = Mathf.Clamp(paragraph.Start, offset, text.Length);
+                int end = Mathf.Clamp(paragraph.Start + paragraph.Length, start, text.Length);
+                if (GetTMPParagraphTagFlags(in textInfo, in paragraph, start, end) != TMPParagraphTagFlags.None)
+                    return true;
+                if (FindTrailingLineBreakStart(text, start, end) < end)
+                {
+                    float boundarySpacing = paragraph.SpaceAfter;
+                    if (i + 1 < paragraphs.Length)
+                        boundarySpacing += paragraphs[i + 1].SpaceBefore;
+                    if (QuantizeTMPValue(boundarySpacing) != 0f)
+                        return true;
+                }
+                offset = end;
+            }
+            return false;
+        }
+
+        private static TMPParagraphTagFlags GetTMPParagraphTagFlags(
+            in TextLayerInfo textInfo,
+            in TextParagraphRunInfo paragraph,
+            int paragraphStart,
+            int paragraphEnd)
+        {
+            TMPParagraphTagFlags flags = TMPParagraphTagFlags.None;
+            if (paragraph.Justification != textInfo.Justification)
+                flags |= TMPParagraphTagFlags.Alignment;
+            if (QuantizeTMPValue(paragraph.StartIndent) != 0f
+                || QuantizeTMPValue(paragraph.EndIndent) != 0f)
+            {
+                flags |= TMPParagraphTagFlags.Margin;
+            }
+            if (QuantizeTMPValue(paragraph.FirstLineIndent) != 0f)
+                flags |= TMPParagraphTagFlags.LineIndent;
+            float paragraphLineHeight = CalculateParagraphLineHeight(in textInfo, paragraphStart, paragraphEnd);
+            if (QuantizeTMPValue(paragraphLineHeight) > 0f
+                && QuantizeTMPValue(Mathf.Abs(paragraphLineHeight - GetUniformTMPLineHeight(in textInfo))) > 0f)
+                flags |= TMPParagraphTagFlags.LineHeight;
+            return flags;
+        }
+
+        private static float GetUniformTMPLineHeight(in TextLayerInfo textInfo)
+        {
+            float fontSize = Mathf.Max(1f, textInfo.FontSize);
+            return textInfo.IsAutoLineSpacing || textInfo.LineSpacing <= 0f
+                ? fontSize * 1.2f
+                : textInfo.LineSpacing;
+        }
+
+        private static string SerializeTMPText(in TextLayerInfo textInfo, in TMPTextRenderPlan plan)
+        {
+            string sourceText = plan.Text;
+            var builder = new StringBuilder(sourceText.Length + plan.RunCount * 48);
+            var currentTags = new TMPTextTag[13];
+            var nextTags = new TMPTextTag[13];
+            int currentTagCount = 0;
+            int runIndex = 0;
             int textOffset = 0;
+            var paragraphRuns = textInfo.ParagraphRuns;
+            bool emitLineHeightTags = plan.HasRichText;
             if (paragraphRuns == null || paragraphRuns.Length == 0)
             {
                 AppendTMPStyledRange(
                     builder,
-                    sourceText,
-                    in textInfo,
-                    runFonts,
-                    runMaterials,
+                    in plan,
                     0,
                     sourceText.Length,
-                    emitRunColors,
-                    ref styleIndex);
+                    ref runIndex,
+                    ref currentTags,
+                    ref nextTags,
+                    ref currentTagCount);
                 return builder.ToString();
             }
 
             for (int i = 0; i < paragraphRuns.Length && textOffset < sourceText.Length; i++)
             {
-                var paragraph = paragraphRuns[i];
+                TextParagraphRunInfo paragraph = paragraphRuns[i];
                 int paragraphStart = Mathf.Clamp(paragraph.Start, textOffset, sourceText.Length);
                 int paragraphEnd = Mathf.Clamp(paragraph.Start + paragraph.Length, paragraphStart, sourceText.Length);
                 if (paragraphStart > textOffset)
                 {
                     AppendTMPStyledRange(
                         builder,
-                        sourceText,
-                        in textInfo,
-                        runFonts,
-                        runMaterials,
+                        in plan,
                         textOffset,
                         paragraphStart,
-                        emitRunColors,
-                        ref styleIndex);
+                        ref runIndex,
+                        ref currentTags,
+                        ref nextTags,
+                        ref currentTagCount);
                 }
 
-                bool hasLineHeight = AppendTMPParagraphOpening(
+                TMPParagraphTagFlags paragraphTags = AppendTMPParagraphOpening(
                     builder,
                     in textInfo,
                     in paragraph,
                     paragraphStart,
-                    paragraphEnd);
+                    paragraphEnd,
+                    emitLineHeightTags);
                 int lineBreakStart = FindTrailingLineBreakStart(sourceText, paragraphStart, paragraphEnd);
                 AppendTMPStyledRange(
                     builder,
-                    sourceText,
-                    in textInfo,
-                    runFonts,
-                    runMaterials,
+                    in plan,
                     paragraphStart,
                     lineBreakStart,
-                    emitRunColors,
-                    ref styleIndex);
+                    ref runIndex,
+                    ref currentTags,
+                    ref nextTags,
+                    ref currentTagCount);
                 if (lineBreakStart < paragraphEnd)
                 {
                     float boundarySpacing = paragraph.SpaceAfter;
                     if (i + 1 < paragraphRuns.Length)
-                    {
                         boundarySpacing += paragraphRuns[i + 1].SpaceBefore;
-                    }
-
-                    bool hasBoundaryLineHeight = Mathf.Abs(boundarySpacing) > 0.001f;
+                    bool hasBoundaryLineHeight = QuantizeTMPValue(boundarySpacing) != 0f;
                     if (hasBoundaryLineHeight)
                     {
                         float lineHeight = CalculateParagraphLineHeight(
@@ -2262,20 +2874,17 @@ namespace UGF.EditorTools.Psd2UGUI
 
                     AppendTMPStyledRange(
                         builder,
-                        sourceText,
-                        in textInfo,
-                        runFonts,
-                        runMaterials,
+                        in plan,
                         lineBreakStart,
                         paragraphEnd,
-                        emitRunColors,
-                        ref styleIndex);
+                        ref runIndex,
+                        ref currentTags,
+                        ref nextTags,
+                        ref currentTagCount);
                     if (hasBoundaryLineHeight)
-                    {
                         builder.Append("</line-height>");
-                    }
                 }
-                AppendTMPParagraphClosing(builder, in paragraph, hasLineHeight);
+                AppendTMPParagraphClosing(builder, paragraphTags);
                 textOffset = paragraphEnd;
             }
 
@@ -2283,61 +2892,64 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 AppendTMPStyledRange(
                     builder,
-                    sourceText,
-                    in textInfo,
-                    runFonts,
-                    runMaterials,
+                    in plan,
                     textOffset,
                     sourceText.Length,
-                    emitRunColors,
-                    ref styleIndex);
+                    ref runIndex,
+                    ref currentTags,
+                    ref nextTags,
+                    ref currentTagCount);
             }
             return builder.ToString();
         }
 
-        private static bool AppendTMPParagraphOpening(
+        private static TMPParagraphTagFlags AppendTMPParagraphOpening(
             StringBuilder builder,
             in TextLayerInfo textInfo,
             in TextParagraphRunInfo paragraph,
             int paragraphStart,
-            int paragraphEnd)
+            int paragraphEnd,
+            bool emitLineHeightTags)
         {
-            builder.Append("<align=").Append(GetTMPAlignmentTag(paragraph.Justification)).Append('>');
-            if (Mathf.Abs(paragraph.StartIndent) > 0.001f)
+            TMPParagraphTagFlags flags = GetTMPParagraphTagFlags(
+                in textInfo,
+                in paragraph,
+                paragraphStart,
+                paragraphEnd);
+            if ((flags & TMPParagraphTagFlags.Alignment) != 0)
+                builder.Append("<align=").Append(GetTMPAlignmentTag(paragraph.Justification)).Append('>');
+            if ((flags & TMPParagraphTagFlags.Margin) != 0)
             {
-                builder.Append("<margin-left=").Append(FormatTMPValue(paragraph.StartIndent)).Append("px>");
+                if (QuantizeTMPValue(paragraph.StartIndent) != 0f)
+                    builder.Append("<margin-left=").Append(FormatTMPValue(paragraph.StartIndent)).Append("px>");
+                if (QuantizeTMPValue(paragraph.EndIndent) != 0f)
+                    builder.Append("<margin-right=").Append(FormatTMPValue(paragraph.EndIndent)).Append("px>");
             }
-            if (Mathf.Abs(paragraph.EndIndent) > 0.001f)
-            {
-                builder.Append("<margin-right=").Append(FormatTMPValue(paragraph.EndIndent)).Append("px>");
-            }
-            if (Mathf.Abs(paragraph.FirstLineIndent) > 0.001f)
-            {
+            if ((flags & TMPParagraphTagFlags.LineIndent) != 0)
                 builder.Append("<line-indent=").Append(FormatTMPValue(paragraph.FirstLineIndent)).Append("px>");
-            }
-
-            float lineHeight = CalculateParagraphLineHeight(in textInfo, paragraphStart, paragraphEnd);
-            if (lineHeight > 0f)
+            if ((flags & TMPParagraphTagFlags.LineHeight) != 0 || emitLineHeightTags)
             {
-                builder.Append("<line-height=").Append(FormatTMPValue(lineHeight)).Append("px>");
-                return true;
+                float lineHeight = CalculateParagraphLineHeight(in textInfo, paragraphStart, paragraphEnd);
+                // 0px 是绝对行零高，会让多行叠在一起；算不出行高就交给 TMP 自己的 lineSpacing。
+                if (lineHeight > 0f)
+                {
+                    flags |= TMPParagraphTagFlags.LineHeight;
+                    builder.Append("<line-height=").Append(FormatTMPValue(lineHeight)).Append("px>");
+                }
             }
-
-            return false;
+            return flags;
         }
 
-        private static void AppendTMPParagraphClosing(
-            StringBuilder builder,
-            in TextParagraphRunInfo paragraph,
-            bool hasLineHeight)
+        private static void AppendTMPParagraphClosing(StringBuilder builder, TMPParagraphTagFlags flags)
         {
-            if (hasLineHeight)
+            if ((flags & TMPParagraphTagFlags.LineHeight) != 0)
                 builder.Append("</line-height>");
-            if (Mathf.Abs(paragraph.FirstLineIndent) > 0.001f)
+            if ((flags & TMPParagraphTagFlags.LineIndent) != 0)
                 builder.Append("</line-indent>");
-            if (Mathf.Abs(paragraph.StartIndent) > 0.001f || Mathf.Abs(paragraph.EndIndent) > 0.001f)
+            if ((flags & TMPParagraphTagFlags.Margin) != 0)
                 builder.Append("</margin>");
-            builder.Append("</align>");
+            if ((flags & TMPParagraphTagFlags.Alignment) != 0)
+                builder.Append("</align>");
         }
 
         private static int FindTrailingLineBreakStart(string text, int start, int end)
@@ -2371,131 +2983,253 @@ namespace UGF.EditorTools.Psd2UGUI
             return lineHeight;
         }
 
+        private enum TMPTextTagKind : byte
+        {
+            Font,
+            Material,
+            Size,
+            Color,
+            CharacterSpacing,
+            BaselineShift,
+            HorizontalScale,
+            Bold,
+            Italic,
+            Underline,
+            Strikethrough,
+            Uppercase,
+            SmallCaps,
+            NoBreak,
+        }
+
+        private struct TMPTextTag
+        {
+            public TMPTextTagKind Kind;
+            public UnityEngine.Object Asset;
+            public Material Material;
+            public float Value;
+            public Color32 Color;
+        }
+
         private static void AppendTMPStyledRange(
             StringBuilder builder,
-            string sourceText,
-            in TextLayerInfo textInfo,
-            TMP_FontAsset[] runFonts,
-            Material[] runMaterials,
+            in TMPTextRenderPlan plan,
             int rangeStart,
             int rangeEnd,
-            bool emitRunColors,
-            ref int styleIndex)
+            ref int runIndex,
+            ref TMPTextTag[] currentTags,
+            ref TMPTextTag[] nextTags,
+            ref int currentTagCount)
         {
-            var runs = textInfo.StyleRuns;
-            while (styleIndex < runs.Length && runs[styleIndex].Start + runs[styleIndex].Length <= rangeStart)
-                styleIndex++;
+            var runs = plan.Runs;
+            while (runIndex < plan.RunCount && runs[runIndex].Start + runs[runIndex].Length <= rangeStart)
+                runIndex++;
 
             int offset = rangeStart;
-            while (offset < rangeEnd && styleIndex < runs.Length)
+            while (offset < rangeEnd && runIndex < plan.RunCount)
             {
-                var run = runs[styleIndex];
+                TMPTextRenderRun run = runs[runIndex];
                 int runStart = Mathf.Max(offset, run.Start);
                 int runEnd = Mathf.Min(rangeEnd, run.Start + run.Length);
                 if (runStart > offset)
-                {
-                    AppendEscapedTMPText(builder, sourceText, offset, runStart - offset);
-                }
+                    AppendEscapedTMPText(builder, plan.Text, offset, runStart - offset);
                 if (runEnd > runStart)
                 {
-                    var runFont = runFonts[styleIndex];
-                    var runMaterial = runMaterials != null && styleIndex < runMaterials.Length
-                        ? runMaterials[styleIndex]
-                        : null;
-                    bool emitFontTag = runFont != null
-                        && runFonts.Length > 0
-                        && runFont != runFonts[0];
-                    bool emitMaterial = runMaterial != null
-                        && runMaterials.Length > 0
-                        && runMaterial != runMaterials[0];
-                    bool emitStandaloneMaterial = emitMaterial && !emitFontTag;
-                    AppendTMPStyleOpening(
-                        builder,
-                        in run,
-                        runFont,
-                        runMaterial,
-                        emitFontTag,
-                        emitMaterial,
-                        emitStandaloneMaterial,
-                        emitRunColors);
-                    AppendEscapedTMPText(builder, sourceText, runStart, runEnd - runStart);
-                    AppendTMPStyleClosing(builder, in run, emitFontTag, emitStandaloneMaterial, emitRunColors);
+                    int nextTagCount = FillTMPTextTags(in run.Style, in plan, nextTags);
+                    int commonCount = 0;
+                    while (commonCount < currentTagCount
+                        && commonCount < nextTagCount
+                        && AreTMPTextTagsEqual(in currentTags[commonCount], in nextTags[commonCount]))
+                    {
+                        commonCount++;
+                    }
+                    for (int i = currentTagCount - 1; i >= commonCount; i--)
+                        AppendTMPTextTagClosing(builder, currentTags[i].Kind);
+                    for (int i = commonCount; i < nextTagCount; i++)
+                        AppendTMPTextTagOpening(builder, in nextTags[i]);
+
+                    AppendEscapedTMPText(builder, plan.Text, runStart, runEnd - runStart);
+                    TMPTextTag[] swap = currentTags;
+                    currentTags = nextTags;
+                    nextTags = swap;
+                    currentTagCount = nextTagCount;
                     offset = runEnd;
                 }
                 if (run.Start + run.Length <= offset)
-                    styleIndex++;
+                    runIndex++;
             }
 
             if (offset < rangeEnd)
-            {
-                AppendEscapedTMPText(builder, sourceText, offset, rangeEnd - offset);
-            }
+                AppendEscapedTMPText(builder, plan.Text, offset, rangeEnd - offset);
+            for (int i = currentTagCount - 1; i >= 0; i--)
+                AppendTMPTextTagClosing(builder, currentTags[i].Kind);
+            currentTagCount = 0;
         }
 
-        private static void AppendTMPStyleOpening(
-            StringBuilder builder,
-            in TextStyleRunInfo run,
-            TMP_FontAsset font,
-            Material material,
-            bool emitFontTag,
-            bool emitMaterial,
-            bool emitStandaloneMaterial,
-            bool emitRunColor)
+        private static int FillTMPTextTags(
+            in TMPTextRunStyle style,
+            in TMPTextRenderPlan plan,
+            TMPTextTag[] tags)
         {
-            if (emitFontTag)
+            int count = 0;
+            bool emitFont = style.Font != null && style.Font != plan.ComponentStyle.Font;
+            bool emitMaterial = style.Material != null && style.Material != plan.ComponentStyle.Material;
+            if (emitFont)
             {
-                builder.Append("<font=\"").Append(font.name).Append('"');
-                if (emitMaterial)
+                tags[count++] = new TMPTextTag
                 {
-                    builder.Append(" material=\"").Append(material.name).Append('"');
-                }
-                builder.Append('>');
+                    Kind = TMPTextTagKind.Font,
+                    Asset = style.Font,
+                    Material = emitMaterial ? style.Material : null,
+                };
             }
-            else if (emitStandaloneMaterial)
+            else if (emitMaterial)
             {
-                builder.Append("<material=\"").Append(material.name).Append("\">");
+                tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.Material, Asset = style.Material };
             }
-            builder.Append("<size=").Append(FormatTMPValue(run.FontSize)).Append("px>");
-            if (emitRunColor)
-                builder.Append("<color=#").Append(ColorUtility.ToHtmlStringRGBA(run.Color)).Append('>');
-            if (Mathf.Abs(run.CharacterSpacing) > 0.001f)
+            if (style.FontSize != plan.ComponentStyle.FontSize)
+                tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.Size, Value = style.FontSize };
+            if (plan.EmitRunColors && !AreColorsEqual(style.Color, plan.ComponentStyle.Color))
+                tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.Color, Color = style.Color };
+            if (plan.EmitCharacterSpacingTags && style.CharacterSpacing != 0f)
             {
-                builder.Append("<cspace=").Append(FormatTMPValue(run.CharacterSpacing * 0.01f)).Append("em>");
+                tags[count++] = new TMPTextTag
+                {
+                    Kind = TMPTextTagKind.CharacterSpacing,
+                    Value = QuantizeTMPValue(style.CharacterSpacing * 0.01f),
+                };
             }
-            if (Mathf.Abs(run.BaselineShift) > 0.001f)
-                builder.Append("<voffset=").Append(FormatTMPValue(run.BaselineShift)).Append("px>");
-            if (Mathf.Abs(run.HorizontalScale - 1f) > 0.001f)
-                builder.Append("<scale=").Append(FormatTMPValue(run.HorizontalScale)).Append('>');
-            if ((run.TMPFontStyle & FontStyles.Bold) != 0) builder.Append("<b>");
-            if ((run.TMPFontStyle & FontStyles.Italic) != 0) builder.Append("<i>");
-            if ((run.TMPFontStyle & FontStyles.Underline) != 0) builder.Append("<u>");
-            if ((run.TMPFontStyle & FontStyles.Strikethrough) != 0) builder.Append("<s>");
-            if (run.Capitalization == PsdTextCapitalization.AllCaps) builder.Append("<uppercase>");
-            else if (run.Capitalization == PsdTextCapitalization.SmallCaps) builder.Append("<smallcaps>");
-            if (run.NoBreak) builder.Append("<nobr>");
+            if (style.BaselineShift != 0f)
+                tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.BaselineShift, Value = style.BaselineShift };
+            if (style.HorizontalScale != 1f)
+                tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.HorizontalScale, Value = style.HorizontalScale };
+            if (plan.EmitFontStyleTags)
+            {
+                if ((style.FontStyle & FontStyles.Bold) != 0)
+                    tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.Bold };
+                if ((style.FontStyle & FontStyles.Italic) != 0)
+                    tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.Italic };
+                if ((style.FontStyle & FontStyles.Underline) != 0)
+                    tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.Underline };
+                if ((style.FontStyle & FontStyles.Strikethrough) != 0)
+                    tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.Strikethrough };
+                if (style.Capitalization == PsdTextCapitalization.AllCaps)
+                    tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.Uppercase };
+                else if (style.Capitalization == PsdTextCapitalization.SmallCaps)
+                    tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.SmallCaps };
+            }
+            if (style.NoBreak)
+                tags[count++] = new TMPTextTag { Kind = TMPTextTagKind.NoBreak };
+            return count;
         }
 
-        private static void AppendTMPStyleClosing(
-            StringBuilder builder,
-            in TextStyleRunInfo run,
-            bool emitFontTag,
-            bool emitStandaloneMaterial,
-            bool emitRunColor)
+        private static bool AreTMPTextTagsEqual(in TMPTextTag left, in TMPTextTag right)
         {
-            if (run.NoBreak) builder.Append("</nobr>");
-            if (run.Capitalization == PsdTextCapitalization.AllCaps) builder.Append("</uppercase>");
-            else if (run.Capitalization == PsdTextCapitalization.SmallCaps) builder.Append("</smallcaps>");
-            if ((run.TMPFontStyle & FontStyles.Strikethrough) != 0) builder.Append("</s>");
-            if ((run.TMPFontStyle & FontStyles.Underline) != 0) builder.Append("</u>");
-            if ((run.TMPFontStyle & FontStyles.Italic) != 0) builder.Append("</i>");
-            if ((run.TMPFontStyle & FontStyles.Bold) != 0) builder.Append("</b>");
-            if (Mathf.Abs(run.HorizontalScale - 1f) > 0.001f) builder.Append("</scale>");
-            if (Mathf.Abs(run.BaselineShift) > 0.001f) builder.Append("</voffset>");
-            if (Mathf.Abs(run.CharacterSpacing) > 0.001f) builder.Append("</cspace>");
-            if (emitRunColor) builder.Append("</color>");
-            builder.Append("</size>");
-            if (emitStandaloneMaterial) builder.Append("</material>");
-            if (emitFontTag) builder.Append("</font>");
+            return left.Kind == right.Kind
+                && left.Asset == right.Asset
+                && left.Material == right.Material
+                && left.Value == right.Value
+                && AreColorsEqual(left.Color, right.Color);
+        }
+
+        private static void AppendTMPTextTagOpening(StringBuilder builder, in TMPTextTag tag)
+        {
+            switch (tag.Kind)
+            {
+                case TMPTextTagKind.Font:
+                    builder.Append("<font=\"").Append(tag.Asset.name).Append('"');
+                    if (tag.Material != null)
+                        builder.Append(" material=\"").Append(tag.Material.name).Append('"');
+                    builder.Append('>');
+                    break;
+                case TMPTextTagKind.Material:
+                    builder.Append("<material=\"").Append(tag.Asset.name).Append("\">");
+                    break;
+                case TMPTextTagKind.Size:
+                    builder.Append("<size=").Append(FormatTMPValue(tag.Value)).Append("px>");
+                    break;
+                case TMPTextTagKind.Color:
+                    builder.Append("<color=#").Append(ColorUtility.ToHtmlStringRGBA(tag.Color)).Append('>');
+                    break;
+                case TMPTextTagKind.CharacterSpacing:
+                    builder.Append("<cspace=").Append(FormatTMPValue(tag.Value)).Append("em>");
+                    break;
+                case TMPTextTagKind.BaselineShift:
+                    builder.Append("<voffset=").Append(FormatTMPValue(tag.Value)).Append("px>");
+                    break;
+                case TMPTextTagKind.HorizontalScale:
+                    builder.Append("<scale=").Append(FormatTMPValue(tag.Value)).Append('>');
+                    break;
+                case TMPTextTagKind.Bold:
+                    builder.Append("<b>");
+                    break;
+                case TMPTextTagKind.Italic:
+                    builder.Append("<i>");
+                    break;
+                case TMPTextTagKind.Underline:
+                    builder.Append("<u>");
+                    break;
+                case TMPTextTagKind.Strikethrough:
+                    builder.Append("<s>");
+                    break;
+                case TMPTextTagKind.Uppercase:
+                    builder.Append("<uppercase>");
+                    break;
+                case TMPTextTagKind.SmallCaps:
+                    builder.Append("<smallcaps>");
+                    break;
+                case TMPTextTagKind.NoBreak:
+                    builder.Append("<nobr>");
+                    break;
+            }
+        }
+
+        private static void AppendTMPTextTagClosing(StringBuilder builder, TMPTextTagKind kind)
+        {
+            switch (kind)
+            {
+                case TMPTextTagKind.Font:
+                    builder.Append("</font>");
+                    break;
+                case TMPTextTagKind.Material:
+                    builder.Append("</material>");
+                    break;
+                case TMPTextTagKind.Size:
+                    builder.Append("</size>");
+                    break;
+                case TMPTextTagKind.Color:
+                    builder.Append("</color>");
+                    break;
+                case TMPTextTagKind.CharacterSpacing:
+                    builder.Append("</cspace>");
+                    break;
+                case TMPTextTagKind.BaselineShift:
+                    builder.Append("</voffset>");
+                    break;
+                case TMPTextTagKind.HorizontalScale:
+                    builder.Append("</scale>");
+                    break;
+                case TMPTextTagKind.Bold:
+                    builder.Append("</b>");
+                    break;
+                case TMPTextTagKind.Italic:
+                    builder.Append("</i>");
+                    break;
+                case TMPTextTagKind.Underline:
+                    builder.Append("</u>");
+                    break;
+                case TMPTextTagKind.Strikethrough:
+                    builder.Append("</s>");
+                    break;
+                case TMPTextTagKind.Uppercase:
+                    builder.Append("</uppercase>");
+                    break;
+                case TMPTextTagKind.SmallCaps:
+                    builder.Append("</smallcaps>");
+                    break;
+                case TMPTextTagKind.NoBreak:
+                    builder.Append("</nobr>");
+                    break;
+            }
         }
 
         private static void AppendEscapedTMPText(
@@ -2522,7 +3256,13 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private static string FormatTMPValue(float value)
         {
-            return value.ToString("0.###", CultureInfo.InvariantCulture);
+            return QuantizeTMPValue(value).ToString("0.###", CultureInfo.InvariantCulture);
+        }
+
+        private static float QuantizeTMPValue(float value)
+        {
+            float quantized = Mathf.Round(value * 1000f) * 0.001f;
+            return Mathf.Abs(quantized) < 0.0005f ? 0f : quantized;
         }
 
         private static string GetTMPAlignmentTag(PsdTextJustification justification)
@@ -2662,6 +3402,16 @@ namespace UGF.EditorTools.Psd2UGUI
                 if (fx != null)
                 {
                     GameObject.DestroyImmediate(fx);
+                }
+            }
+            // Outline 与 Shadow 成对清理：复用同一个 Text 节点时不能逐轮叠加，PSD 去掉描边后也不能残留。
+            var outlines = textCom.GetComponents<Outline>();
+            for (int i = 0; i < outlines.Length; i++)
+            {
+                var outline = outlines[i];
+                if (outline != null)
+                {
+                    GameObject.DestroyImmediate(outline);
                 }
             }
         }
@@ -2874,7 +3624,9 @@ namespace UGF.EditorTools.Psd2UGUI
             }
             if (baseMaterial == null) return null;
             fontSize = Mathf.Max(1f, fontSize);
+#if !UNITY_6000_6_OR_NEWER
             ShaderUtilities.GetShaderPropertyIDs();
+#endif
 
             float gradientScale = GetTMPMaterialGradientScale(baseMaterial);
             float atlasPointSize = fontAsset != null && fontAsset.faceInfo.pointSize > 0f
@@ -4067,7 +4819,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
             if (mat.HasProperty(ShaderUtilities.ID_OutlineColor))
             {
-                mat.SetColor(ShaderUtilities.ID_OutlineColor, hasOutline ? outlineColor : Color.clear);
+                mat.SetColor(ShaderUtilities.ID_OutlineColor, hasOutline ? (Color)outlineColor : Color.clear);
             }
             if (hasOutline)
             {
@@ -4080,7 +4832,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
             if (mat.HasProperty(ShaderUtilities.ID_UnderlayColor))
             {
-                mat.SetColor(ShaderUtilities.ID_UnderlayColor, hasShadow ? shadowColor : Color.clear);
+                mat.SetColor(ShaderUtilities.ID_UnderlayColor, hasShadow ? (Color)shadowColor : Color.clear);
             }
             if (mat.HasProperty(ShaderUtilities.ID_UnderlayOffsetX))
             {
@@ -4119,7 +4871,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
             if (mat.HasProperty(ShaderUtilities.ID_GlowColor))
             {
-                mat.SetColor(ShaderUtilities.ID_GlowColor, hasGlow ? glowColor : Color.clear);
+                mat.SetColor(ShaderUtilities.ID_GlowColor, hasGlow ? (Color)glowColor : Color.clear);
             }
             if (mat.HasProperty(ShaderUtilities.ID_GlowOffset))
             {
@@ -4262,8 +5014,13 @@ namespace UGF.EditorTools.Psd2UGUI
             if (fontAsset == null || material == null || string.IsNullOrWhiteSpace(effectSignature)) return;
 
             string assetPath = AssetDatabase.GetAssetPath(fontAsset);
-            if (string.IsNullOrWhiteSpace(assetPath) || !assetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+            bool fontIsProjectAsset = !string.IsNullOrWhiteSpace(assetPath)
+                && assetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase);
+            // 字体在 UPM 包里时改存共享输出目录；早退会让特效材质只留在内存，prefab 丢 fontSharedMaterial 引用。
+            string storageFolder = ResolveTMPMaterialFolderPath(fontAsset, null);
+            if (string.IsNullOrWhiteSpace(storageFolder))
             {
+                Debug.LogWarning("未配置共享资源输出目录(SharedAssetsOutput)，TMP 特效材质无法落盘，描边/发光/渐变不会保留在 Prefab 中。");
                 return;
             }
 
@@ -4282,12 +5039,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
             else
             {
-                materialPath = GetSiblingMaterialAssetPath(assetPath, material.name, false);
-                if (string.IsNullOrWhiteSpace(materialPath))
-                {
-                    return;
-                }
-
+                materialPath = $"{storageFolder}/{material.name}.mat";
                 AssetDatabase.CreateAsset(material, materialPath);
                 material = AssetDatabase.LoadAssetAtPath<Material>(materialPath) ?? material;
             }
@@ -4295,7 +5047,7 @@ namespace UGF.EditorTools.Psd2UGUI
             EnsureTMPMaterialHasAtlas(material, fontAsset);
             SetTMPEffectMaterialSignature(fontAsset, materialPath, effectSignature);
             EditorUtility.SetDirty(material);
-            EditorUtility.SetDirty(fontAsset);
+            if (fontIsProjectAsset) EditorUtility.SetDirty(fontAsset);
             AssetDatabase.SaveAssets();
         }
         private static string GetSiblingMaterialAssetPath(string ownerAssetPath, string materialName, bool generateUnique)
@@ -4361,12 +5113,25 @@ namespace UGF.EditorTools.Psd2UGUI
         private static string ResolveTMPMaterialFolderPath(TMP_FontAsset fontAsset, Material baseMaterial)
         {
             string ownerAssetPath = fontAsset != null ? AssetDatabase.GetAssetPath(fontAsset) : baseMaterial != null ? AssetDatabase.GetAssetPath(baseMaterial) : null;
-            if (string.IsNullOrWhiteSpace(ownerAssetPath) || !ownerAssetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrWhiteSpace(ownerAssetPath) && ownerAssetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
             {
-                return null;
+                return Path.GetDirectoryName(ownerAssetPath)?.Replace("\\", "/");
             }
 
-            return Path.GetDirectoryName(ownerAssetPath)?.Replace("\\", "/");
+            // UPM 包里的字体（TMP 自带 LiberationSans 等）不能往里写。改存到共享输出目录，
+            // 否则特效材质只留在内存，存 prefab 时 fontSharedMaterial 引用会静默丢失。
+            var parser = Instance;
+            string shared = parser != null ? parser.SharedAssetsOutput : null;
+            if (string.IsNullOrWhiteSpace(shared)) return null;
+            shared = shared.Replace("\\", "/").TrimEnd('/');
+            string fontKey = LayerNameUtility.Sanitize(fontAsset != null ? fontAsset.name : "Default");
+            string folder = $"{shared}/TMP Effects/{fontKey}";
+            if (!Directory.Exists(folder))
+            {
+                Directory.CreateDirectory(folder);
+                AssetDatabase.Refresh();
+            }
+            return folder;
         }
         private static string GetTMPFontAssetSignature(TMP_FontAsset fontAsset)
         {
@@ -4525,12 +5290,12 @@ namespace UGF.EditorTools.Psd2UGUI
 
             for (int i = 0; i < subAssets.Length; i++)
             {
-                if (subAssets[i] is not Texture2D texture)
+                if (!(subAssets[i] is Texture2D texture))
                 {
                     continue;
                 }
 
-                fallback ??= texture;
+                if (fallback == null) fallback = texture;
                 if (texture.name.IndexOf("Atlas", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return texture;
@@ -4546,7 +5311,9 @@ namespace UGF.EditorTools.Psd2UGUI
                 return false;
             }
 
+#if !UNITY_6000_6_OR_NEWER
             ShaderUtilities.GetShaderPropertyIDs();
+#endif
             var atlasTexture = ResolveTMPFontAtlasTexture(fontAsset);
             if (atlasTexture == null)
             {
@@ -4784,17 +5551,17 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (baseMaterial == null) return null;
 
+#if !UNITY_6000_6_OR_NEWER
             ShaderUtilities.GetShaderPropertyIDs();
-            Material material;
+#endif
+            var material = new Material(baseMaterial);
             var distanceFieldShader = preferDistanceFieldShader ? Shader.Find("TextMeshPro/Distance Field") : null;
             if (distanceFieldShader != null && baseMaterial.shader != distanceFieldShader)
             {
-                material = new Material(distanceFieldShader);
-                material.CopyPropertiesFromMaterial(baseMaterial);
-            }
-            else
-            {
-                material = new Material(baseMaterial);
+                // Unity 6.0 can discard destination-only shader properties when
+                // CopyPropertiesFromMaterial copies a Mobile SDF material. Clone
+                // first, then switch shader so FaceTex / glow / bevel stay writable.
+                material.shader = distanceFieldShader;
             }
 
             var mainTexture = baseMaterial.GetTexture(ShaderUtilities.ID_MainTex);
@@ -5069,7 +5836,9 @@ namespace UGF.EditorTools.Psd2UGUI
                 return null;
             }
 
+#if !UNITY_6000_6_OR_NEWER
             ShaderUtilities.GetShaderPropertyIDs();
+#endif
             string sourceFontPath = AssetDatabase.GetAssetPath(sourceFont);
             if (string.IsNullOrWhiteSpace(sourceFontPath))
             {
@@ -5213,7 +5982,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceSynchronousImport);
                 persistedFontAsset = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(assetPath);
             }
-            persistedFontAsset ??= fontAsset;
+            if (persistedFontAsset == null) persistedFontAsset = fontAsset;
             EnsureTMPFontAssetResources(persistedFontAsset);
             return persistedFontAsset;
         }
@@ -5728,11 +6497,13 @@ namespace UGF.EditorTools.Psd2UGUI
                 aliasRules.Add(alias, aliasRule);
             }
 
-            if (!string.IsNullOrWhiteSpace(main)) aliasRule.Main = main;
-            if (!string.IsNullOrWhiteSpace(export)) aliasRule.Export = export;
-            if (!string.IsNullOrWhiteSpace(role)) aliasRule.Role = role;
-            if (!string.IsNullOrWhiteSpace(imageType)) aliasRule.ImageType = imageType;
-            if (!string.IsNullOrWhiteSpace(textBackend)) aliasRule.TextBackend = textBackend;
+            // 同一个 tag 配进多条规则时，Unity 解析取首条命中；这里也必须首条优先，
+            // 否则 PS 菜单加的后缀在 Unity 里会被解析成别的控件。
+            if (!string.IsNullOrWhiteSpace(main) && string.IsNullOrWhiteSpace(aliasRule.Main)) aliasRule.Main = main;
+            if (!string.IsNullOrWhiteSpace(export) && string.IsNullOrWhiteSpace(aliasRule.Export)) aliasRule.Export = export;
+            if (!string.IsNullOrWhiteSpace(role) && string.IsNullOrWhiteSpace(aliasRule.Role)) aliasRule.Role = role;
+            if (!string.IsNullOrWhiteSpace(imageType) && string.IsNullOrWhiteSpace(aliasRule.ImageType)) aliasRule.ImageType = imageType;
+            if (!string.IsNullOrWhiteSpace(textBackend) && string.IsNullOrWhiteSpace(aliasRule.TextBackend)) aliasRule.TextBackend = textBackend;
         }
 
         private void RegisterRuleForPsTagConfig(
@@ -6787,6 +7558,9 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 sanitized = sanitized.Substring(0, MaxNameLength);
             }
+            // 截断点可能让结尾残留 '_' 或 '.'：既违反上面的收尾规则，Windows 也会去掉结尾 '.'，
+            // 造成记录名与真实文件名不一致。
+            sanitized = sanitized.TrimEnd('_', '.');
             if (ReservedNames.Contains(sanitized))
             {
                 sanitized = "_" + sanitized;

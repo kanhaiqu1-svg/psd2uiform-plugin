@@ -22,6 +22,7 @@ using cn.efunstudio.psdreader;
 using cn.efunstudio.psdreader.PsdParser;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 
 namespace UGF.EditorTools.Psd2UGUI
 {
@@ -37,18 +38,9 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private sealed class NodePreviewExportContext
         {
-            public readonly Dictionary<PsdLayerNode, NodePreviewExportResult> NodeResults = new Dictionary<PsdLayerNode, NodePreviewExportResult>();
             public readonly Dictionary<string, string> ContentHashToPath = new Dictionary<string, string>(StringComparer.Ordinal);
             public readonly HashSet<string> UsedPreviewPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             public string ProjectRoot;
-        }
-
-        private struct NodePreviewExportResult
-        {
-            public string PreviewImagePath;
-            public string PreviewKind;
-            public string PreviewSourceId;
-            public string VisualHash;
         }
 
         private struct PreviewCanvasGeometry
@@ -63,9 +55,6 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private static readonly UTF8Encoding Utf8NoBom = new UTF8Encoding(false);
         private const string PreviewFileName = "preview.png";
-        private const string AnnotatedPreviewFileName = "annotated-preview.png";
-        private const string NodePreviewDirectoryName = "node-previews";
-        private const string AtlasDirectoryName = "node-atlas";
         private const int AtlasColumns = 8;
         private const int AtlasRows = 4;
         private const int AtlasCellWidth = 256;
@@ -78,8 +67,6 @@ namespace UGF.EditorTools.Psd2UGUI
         private const float AtlasSourceTransparentBorderPixels = 1f;
         private static readonly Color32 TransparentBlack = new Color32(0, 0, 0, 0);
         private static readonly Color32 AtlasGridBorderColor = new Color32(176, 176, 176, 255);
-        private const int AnnotatedLabelWidth = 38;
-        private const int AnnotatedLabelHeight = 13;
 
         internal bool Build(Psd2UIFormConverter converter, AiJobContext context, out string treeHash, out string error)
         {
@@ -98,7 +85,8 @@ namespace UGF.EditorTools.Psd2UGUI
 
             try
             {
-                var sharedBundle = BuildSharedBundleContext(converter);
+                var exportTimer = System.Diagnostics.Stopwatch.StartNew();
+                var sharedBundle = BuildSharedBundleContext(converter, context);
                 var previewExportContext = new NodePreviewExportContext
                 {
                     ProjectRoot = Directory.GetParent(Application.dataPath).FullName
@@ -106,22 +94,17 @@ namespace UGF.EditorTools.Psd2UGUI
                 var package = new AiAnalysisPackageDocument
                 {
                     version = AiProtocolVersions.AnalysisPackage,
-                    document = BuildDocumentInfo(converter, sharedBundle, out var geometry),
-                    config = BuildConfigInfo()
+                    document = BuildDocumentInfo(converter, sharedBundle, out var geometry)
                 };
 
-                var nodes = converter.GetComponentsInChildren<PsdLayerNode>(true);
-                var shortIds = BuildShortIdMap(nodes);
-                for (int i = 0; i < nodes.Length; i++)
-                {
-                    var nodeEntry = BuildNodeEntry(converter, sharedBundle, previewExportContext, nodes[i], geometry, shortIds);
-                    if (nodeEntry != null)
-                    {
-                        package.nodes.Add(nodeEntry);
-                    }
-                }
+                int nextIndex = 0;
+                BuildSourceEntries(converter.PsdInstance.Childs, string.Empty, ref nextIndex, package,
+                    sharedBundle, previewExportContext, geometry);
+                new AiRenderOrderIndex(package.nodes);
                 CleanupUnusedNodePreviews(sharedBundle, previewExportContext);
                 BuildVisualInputs(package, sharedBundle, previewExportContext.ProjectRoot);
+                CleanupUnusedAtlasPages(sharedBundle, package);
+                NormalizePackageImagePaths(package);
 
                 string packageJson = JsonUtility.ToJson(package, false);
                 treeHash = ComputeSha256(packageJson);
@@ -129,6 +112,8 @@ namespace UGF.EditorTools.Psd2UGUI
                 packageJson = JsonUtility.ToJson(package, false);
 
                 AiJobFileUtility.WriteText(context.AnalysisPackagePath, packageJson);
+                AiJobFileUtility.WriteJson(Path.Combine(context.RequestDirectory, "export-metrics.json"),
+                    new AiRecognitionRunReport { exportMilliseconds = exportTimer.ElapsedMilliseconds });
                 return true;
             }
             catch (Exception ex)
@@ -138,17 +123,20 @@ namespace UGF.EditorTools.Psd2UGUI
             }
         }
 
-        private static SharedBundleContext BuildSharedBundleContext(Psd2UIFormConverter converter)
+        private static SharedBundleContext BuildSharedBundleContext(Psd2UIFormConverter converter, AiJobContext context)
         {
             string projectRoot = Directory.GetParent(Application.dataPath).FullName;
-            string sharedRoot = AiPathDefaults.ToAbsoluteProjectPath(projectRoot, AiPathDefaults.SharedRootRelative);
-            string bundleDirectory = Path.Combine(sharedRoot, AiPathDefaults.GetPsdAssetFolderName(converter != null ? converter.PsdAssetName : null));
+            string bundleDirectory = context != null && !string.IsNullOrWhiteSpace(context.JobDirectory)
+                ? Path.Combine(context.JobDirectory, "img")
+                : Path.Combine(projectRoot, "Library", "Psd2UIForm", AiPathDefaults.GetPsdAssetFolderName(converter != null ? converter.PsdAssetName : null), "img");
             return new SharedBundleContext
             {
                 SharedBundleDirectory = bundleDirectory,
-                SharedNodePreviewDirectory = Path.Combine(bundleDirectory, NodePreviewDirectoryName),
-                AnnotatedPreviewPath = Path.Combine(bundleDirectory, AnnotatedPreviewFileName),
-                AtlasDirectory = Path.Combine(bundleDirectory, AtlasDirectoryName)
+                // All exported images live directly under img. The manifest declares
+                // that root once and all image references are basenames.
+                SharedNodePreviewDirectory = bundleDirectory,
+                AtlasDirectory = bundleDirectory,
+                AnnotatedPreviewPath = Path.Combine(bundleDirectory, "annotated.png")
             };
         }
 
@@ -188,6 +176,9 @@ namespace UGF.EditorTools.Psd2UGUI
                 var sprite = converter.BindPsdAsset;
                 if (sprite != null && sprite.texture != null)
                 {
+                    // 上一轮的 preview.png 可能是按裁剪画布写的，而这里的几何是整图且 left/top=0；
+                    // IfMissing 会直接复用旧文件导致坐标对不上，所以先删掉再按整图重出。
+                    AiJobFileUtility.DeleteFileIfExists(previewImagePath);
                     ExportTextureToPngIfMissing(sprite.texture, previewImagePath);
                     canvasWidth = sprite.texture.width;
                     canvasHeight = sprite.texture.height;
@@ -206,450 +197,78 @@ namespace UGF.EditorTools.Psd2UGUI
                 PsdDocHeight = psdDocHeight
             };
 
+            string sourceHash = ComputeFileHash(converter.PsdAssetName);
+            if (string.IsNullOrEmpty(sourceHash))
+                Debug.LogWarning($"AI 分析包读不到源文档哈希（{converter.PsdAssetName}），源变更探针本轮失效。");
             return new AiAnalysisDocumentInfo
             {
+                sourceHash = sourceHash,
+                imageRoot = string.Empty,
                 previewImagePath = MakeRelativePath(projectRoot, previewImagePath),
                 nodePreviewDirectoryPath = MakeRelativePath(projectRoot, sharedBundle.SharedNodePreviewDirectory),
                 nodeAtlasDirectoryPath = MakeRelativePath(projectRoot, sharedBundle.AtlasDirectory),
+                canvasLeft = canvasLeft, canvasTop = canvasTop, psdWidth = psdDocWidth, psdHeight = psdDocHeight,
                 width = canvasWidth,
                 height = canvasHeight
             };
         }
 
-        private static AiAnalysisConfigInfo BuildConfigInfo()
+        private static void BuildSourceEntries(PsdLayer[] layers, string parent, ref int nextIndex,
+            AiAnalysisPackageDocument package, SharedBundleContext bundle, NodePreviewExportContext export,
+            PreviewCanvasGeometry geometry)
         {
-            var info = new AiAnalysisConfigInfo();
-            var parser = UGUIParser.Instance;
-            if (parser == null) return info;
-
-            var rules = parser.GetRules();
-            if (rules == null) return info;
-
-            for (int i = 0; i < rules.Length; i++)
+            for (int sibling = 0; sibling < layers.Length; sibling++)
             {
-                var rule = rules[i];
-                if (rule == null) continue;
-                if (IsTmpUiType(rule.UIType)) continue;
-
-                info.uiTypeRules.Add(new AiAnalysisUiTypeRuleInfo
+                var layer = layers[sibling];
+                int flatIndex = layer.IsGroup ? nextIndex + layer.CountFlatIndexSlots() - 1 : nextIndex;
+                string id = "psd:" + flatIndex;
+                bool textLayer = layer.TryGetTextLayerInfo(out var text);
+                var entry = new AiAnalysisNodeEntry {
+                    id = id, shortId = "S" + package.nodes.Count.ToString("000"), parentId = parent,
+                    name = layer.Name, layerName = layer.Name, text = textLayer ? text.Text : string.Empty,
+                    layerType = layer.GetLayerType().ToString(), isGroupLayer = layer.IsGroup, isTextLayer = textLayer,
+                    rect = new RectData { x = layer.Left - geometry.CanvasLeft, y = layer.Top - geometry.CanvasTop, w = layer.Width, h = layer.Height },
+                    active = layer.IsVisibleInHierarchy, siblingIndex = sibling, childCount = layer.Childs.Length,
+                    compositeBoundary = layer.IsGroup && !layer.CanRegroupChildren(),
+                    clipping = layer.IsClipping,
+                    requiresBackdrop = layer.RequiresBackdropComposition,
+                    sourceIndex = flatIndex, sourceLayerId = layer.TryGetLayerId(out int nativeId) ? nativeId : -1
+                };
+                if (textLayer && text.StyleRuns != null && text.StyleRuns.Length > 0)
                 {
-                    uiType = rule.UIType.ToString(),
-                    uiTypeDesc = rule.UITypeDesc ?? string.Empty,
-                    typeMatches = CloneStringArray(rule.TypeMatches)
-                });
-            }
-
-            return info;
-        }
-
-        private static string[] CloneStringArray(string[] source)
-        {
-            if (source == null || source.Length == 0) return Array.Empty<string>();
-            var clone = new string[source.Length];
-            Array.Copy(source, clone, source.Length);
-            return clone;
-        }
-
-        private static Dictionary<PsdLayerNode, string> BuildShortIdMap(PsdLayerNode[] nodes)
-        {
-            var result = new Dictionary<PsdLayerNode, string>();
-            if (nodes == null) return result;
-
-            for (int i = 0; i < nodes.Length; i++)
-            {
-                var node = nodes[i];
-                if (node == null || result.ContainsKey(node)) continue;
-                result[node] = "n" + i.ToString("000");
-            }
-            return result;
-        }
-
-        private static string BuildIdPath(Psd2UIFormConverter converter, Transform transform, Dictionary<PsdLayerNode, string> shortIds)
-        {
-            if (transform == null) return string.Empty;
-
-            var stack = new Stack<string>();
-            var current = transform;
-            while (current != null && (converter == null || current != converter.transform))
-            {
-                var node = current.GetComponent<PsdLayerNode>();
-                if (node != null && shortIds != null && shortIds.TryGetValue(node, out var shortId))
-                {
-                    stack.Push(shortId);
+                    var style = PsdLayerNode.ConvertTextStyleRun(text.StyleRuns[0]);
+                    entry.textStyle = new AiTextStyle { font = style.FontName, fontSize = style.FontSize,
+                        color = "#" + ColorUtility.ToHtmlStringRGBA(style.Color), fontStyle = style.FontStyle.ToString() };
                 }
-                current = current.parent;
-            }
-            return stack.Count > 0 ? string.Join("/", stack.ToArray()) : string.Empty;
-        }
-
-        private static string BuildDisplayPath(Psd2UIFormConverter converter, Transform transform)
-        {
-            if (transform == null) return string.Empty;
-
-            var stack = new Stack<string>();
-            var current = transform;
-            while (current != null && (converter == null || current != converter.transform))
-            {
-                stack.Push(current.name ?? string.Empty);
-                current = current.parent;
-            }
-            return stack.Count > 0 ? string.Join("/", stack.ToArray()) : string.Empty;
-        }
-
-        private static string ResolveSuffixMatch(PsdLayerNode node)
-        {
-            if (node == null) return string.Empty;
-
-            string token = TryExtractDotSuffix(node.gameObject.name);
-            if (string.IsNullOrWhiteSpace(token))
-            {
-                token = TryExtractDotSuffix(node.SourceLayerName);
-            }
-            if (string.IsNullOrWhiteSpace(token)) return string.Empty;
-
-            var parser = UGUIParser.Instance;
-            var rules = parser != null ? parser.GetRules() : null;
-            if (rules == null) return string.Empty;
-
-            for (int i = 0; i < rules.Length; i++)
-            {
-                var rule = rules[i];
-                if (rule == null || IsTmpUiType(rule.UIType) || rule.TypeMatches == null) continue;
-                for (int j = 0; j < rule.TypeMatches.Length; j++)
+                PsdResourceNaming.Parse(layer.Name, out entry.referenceKind, out entry.referenceKey);
+                package.nodes.Add(entry);
+                var tree = AiSourceRenderTree.Build(layer.Document, new HashSet<PsdLayer> { layer });
+                // 组证据按 PS 观感合成：整图预览走 Render()（includeHiddenLayers 默认 false，递归跳过隐藏子层），
+                // 这里若带进隐藏子层就和预览对不上。隐藏信息不会丢：nodes.tsv 的 active 列 + TaskPrompt 已说明。
+                var rendered = PsdLayerRenderer.RenderTree(tree, includeHiddenLayers: !layer.IsVisible, isPreviewRender: false);
+                var texture = CreateTextureFromRenderedImage(rendered);
+                if (texture != null)
                 {
-                    if (string.Equals(token, rule.TypeMatches[j], StringComparison.OrdinalIgnoreCase))
-                    {
-                        return rule.UIType.ToString();
+                    try {
+                        string path = ExportTextureToPngIfMissing(texture, Path.Combine(bundle.SharedNodePreviewDirectory, entry.shortId + ".png"), export, NodePreviewTransparentPadding);
+                        entry.imageFile = MakeRelativePath(export.ProjectRoot, path);
+                        entry.visualHash = ComputeFileHash(entry.imageFile);
                     }
+                    finally { UnityEngine.Object.DestroyImmediate(texture); }
                 }
-            }
-            return string.Empty;
-        }
-
-        private static string TryExtractDotSuffix(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-            value = value.Trim();
-            int dot = value.LastIndexOf('.');
-            if (dot < 0 || dot + 1 >= value.Length) return string.Empty;
-            string suffix = value.Substring(dot + 1).Trim();
-            if (suffix.Length == 0) return string.Empty;
-            for (int i = 0; i < suffix.Length; i++)
-            {
-                char ch = suffix[i];
-                if (!char.IsLetterOrDigit(ch) && ch != '_' && ch != '-')
+                // Explicit reuse groups are opaque resources. Their native descendants remain in the
+                // PSD render tree, but must not become additional generated UI/assets.
+                if (layer.IsGroup && string.IsNullOrEmpty(entry.referenceKind))
                 {
-                    return string.Empty;
+                    int childIndex = nextIndex + 1;
+                    int start = package.nodes.Count;
+                    BuildSourceEntries(layer.Childs, id, ref childIndex, package, bundle, export, geometry);
+                    for (int i = start; i < package.nodes.Count; i++)
+                        if (!package.nodes[i].isGroupLayer) entry.renderLeafCount++;
                 }
+                else entry.renderLeafCount = 1;
+                nextIndex += layer.CountFlatIndexSlots();
             }
-            return suffix;
-        }
-
-        private static bool IsTmpUiType(GUIType uiType)
-        {
-            switch (uiType)
-            {
-                case GUIType.TMPText:
-                case GUIType.TMPButton:
-                case GUIType.TMPDropdown:
-                case GUIType.TMPInputField:
-                case GUIType.TMPToggle:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        private static AiAnalysisNodeEntry BuildNodeEntry(Psd2UIFormConverter converter, SharedBundleContext sharedBundle, NodePreviewExportContext previewExportContext, PsdLayerNode node, PreviewCanvasGeometry geometry, Dictionary<PsdLayerNode, string> shortIds)
-        {
-            if (node == null) return null;
-
-            ResolvePreviewRect(node, geometry, out float previewX, out float previewY, out float previewW, out float previewH);
-            bool isTextLayer = node.IsTextLayer(out _);
-            string imageFile = ExportNodePreview(converter, node, sharedBundle, previewExportContext);
-            string nodeId = AiNodeIdUtility.GetNodeId(converter, node);
-            shortIds.TryGetValue(node, out var shortId);
-            previewExportContext.NodeResults.TryGetValue(node, out var previewResult);
-
-            return new AiAnalysisNodeEntry
-            {
-                id = nodeId,
-                shortId = shortId ?? string.Empty,
-                parentId = GetParentId(converter, node.transform.parent),
-                childIds = BuildChildIds(converter, node.transform),
-                onlyChildId = ResolveOnlyChildId(converter, node.transform),
-                idPath = BuildIdPath(converter, node.transform, shortIds),
-                displayPath = BuildDisplayPath(converter, node.transform),
-                name = node.gameObject.name,
-                layerName = node.SourceLayerName,
-                nameTokens = BuildNameTokens(node.gameObject.name, node.SourceLayerName),
-                layerType = node.LayerType.ToString(),
-                isGroupLayer = node.LayerType == PsdLayerType.LayerGroup,
-                isTextLayer = isTextLayer,
-                isGeneratedNode = node.BindPsdLayerIndex < 0,
-                uiType = node.UIType.ToString(),
-                rect = new RectData { x = previewX, y = previewY, w = previewW, h = previewH },
-                imageFile = imageFile,
-                previewKind = string.IsNullOrWhiteSpace(previewResult.PreviewKind) ? "empty" : previewResult.PreviewKind,
-                previewSourceId = previewResult.PreviewSourceId ?? string.Empty,
-                visualHash = previewResult.VisualHash ?? string.Empty,
-                renderLeafCount = CountRenderableLeafLayers(node),
-                suffixMatch = ResolveSuffixMatch(node),
-                siblingIndex = node.transform.GetSiblingIndex(),
-                childCount = node.transform.childCount
-            };
-        }
-
-        private static string[] BuildChildIds(Psd2UIFormConverter converter, Transform parent)
-        {
-            if (converter == null || parent == null || parent.childCount < 1)
-            {
-                return Array.Empty<string>();
-            }
-
-            var childIds = new List<string>(parent.childCount);
-            for (int i = 0; i < parent.childCount; i++)
-            {
-                var childNode = parent.GetChild(i).GetComponent<PsdLayerNode>();
-                if (childNode == null)
-                {
-                    continue;
-                }
-
-                string childId = AiNodeIdUtility.GetNodeId(converter, childNode);
-                if (!string.IsNullOrWhiteSpace(childId))
-                {
-                    childIds.Add(childId);
-                }
-            }
-
-            return childIds.Count > 0 ? childIds.ToArray() : Array.Empty<string>();
-        }
-
-        private static string ResolveOnlyChildId(Psd2UIFormConverter converter, Transform parent)
-        {
-            if (converter == null || parent == null)
-            {
-                return string.Empty;
-            }
-
-            PsdLayerNode onlyChild = null;
-            for (int i = 0; i < parent.childCount; i++)
-            {
-                var childNode = parent.GetChild(i).GetComponent<PsdLayerNode>();
-                if (childNode == null)
-                {
-                    continue;
-                }
-
-                if (onlyChild != null)
-                {
-                    return string.Empty;
-                }
-
-                onlyChild = childNode;
-            }
-
-            return onlyChild != null ? AiNodeIdUtility.GetNodeId(converter, onlyChild) : string.Empty;
-        }
-
-        private static string[] BuildNameTokens(string name, string layerName)
-        {
-            var tokens = new List<string>(8);
-            AppendNameTokens(tokens, name);
-            AppendNameTokens(tokens, layerName);
-            return tokens.Count > 0 ? tokens.ToArray() : Array.Empty<string>();
-        }
-
-        private static void AppendNameTokens(List<string> tokens, string value)
-        {
-            if (tokens == null || string.IsNullOrWhiteSpace(value))
-            {
-                return;
-            }
-
-            int length = value.Length;
-            var builder = new StringBuilder(length);
-            for (int i = 0; i < length; i++)
-            {
-                char ch = value[i];
-                if (char.IsLetterOrDigit(ch))
-                {
-                    builder.Append(char.ToLowerInvariant(ch));
-                    continue;
-                }
-
-                FlushNameToken(tokens, builder);
-            }
-
-            FlushNameToken(tokens, builder);
-        }
-
-        private static void FlushNameToken(List<string> tokens, StringBuilder builder)
-        {
-            if (tokens == null || builder == null || builder.Length < 1)
-            {
-                return;
-            }
-
-            string token = builder.ToString();
-            builder.Length = 0;
-            for (int i = 0; i < tokens.Count; i++)
-            {
-                if (string.Equals(tokens[i], token, StringComparison.Ordinal))
-                {
-                    return;
-                }
-            }
-
-            tokens.Add(token);
-        }
-
-        private static void ResolvePreviewRect(PsdLayerNode node, PreviewCanvasGeometry geometry, out float x, out float y, out float w, out float h)
-        {
-            x = 0f; y = 0f; w = 0f; h = 0f;
-            if (node == null) return;
-
-            var bindLayer = node.BindPsdLayer;
-            if (bindLayer != null)
-            {
-                x = bindLayer.Left - geometry.CanvasLeft;
-                y = bindLayer.Top - geometry.CanvasTop;
-                w = bindLayer.Right - bindLayer.Left;
-                h = bindLayer.Bottom - bindLayer.Top;
-                return;
-            }
-
-            var rect = node.LayerRect;
-            float halfW = rect.width * 0.5f;
-            float halfH = rect.height * 0.5f;
-            float psdDocW = geometry.PsdDocWidth > 0 ? geometry.PsdDocWidth : geometry.CanvasWidth;
-            float psdDocH = geometry.PsdDocHeight > 0 ? geometry.PsdDocHeight : geometry.CanvasHeight;
-            x = rect.x + psdDocW * 0.5f - halfW - geometry.CanvasLeft;
-            y = psdDocH * 0.5f - rect.y - halfH - geometry.CanvasTop;
-            w = rect.width;
-            h = rect.height;
-        }
-
-        private static string GetParentId(Psd2UIFormConverter converter, Transform parent)
-        {
-            if (converter == null || parent == null || parent == converter.transform)
-                return "root";
-            var parentNode = parent.GetComponent<PsdLayerNode>();
-            return parentNode != null ? AiNodeIdUtility.GetNodeId(converter, parentNode) : "root";
-        }
-
-        private static string ExportNodePreview(Psd2UIFormConverter converter, PsdLayerNode node, SharedBundleContext sharedBundle, NodePreviewExportContext previewExportContext)
-        {
-            if (node == null || sharedBundle == null || string.IsNullOrWhiteSpace(sharedBundle.SharedNodePreviewDirectory))
-                return string.Empty;
-
-            if (previewExportContext != null && previewExportContext.NodeResults.TryGetValue(node, out var cached))
-                return cached.PreviewImagePath;
-
-            if (TryGetVisualPassthroughPreviewSource(node, out var previewSource))
-            {
-                var sourcePath = ExportNodePreview(converter, previewSource, sharedBundle, previewExportContext);
-                previewExportContext.NodeResults.TryGetValue(previewSource, out var sourceResult);
-                var inherited = new NodePreviewExportResult
-                {
-                    PreviewImagePath = sourcePath,
-                    PreviewKind = "inherited",
-                    PreviewSourceId = AiNodeIdUtility.GetNodeId(converter, previewSource),
-                    VisualHash = sourceResult.VisualHash ?? ComputePreviewFileHash(sharedBundle, sourcePath)
-                };
-                StorePreviewResult(previewExportContext, node, inherited, sharedBundle);
-                return sourcePath;
-            }
-
-            Texture2D previewTexture = null;
-            bool ownsPreviewTexture = false;
-            string previewKind = "empty";
-            try
-            {
-                if (!TryAcquirePreviewTexture(node, out previewTexture, out ownsPreviewTexture, out previewKind)
-                    || previewTexture == null)
-                {
-                    StorePreviewResult(previewExportContext, node, new NodePreviewExportResult { PreviewImagePath = string.Empty, PreviewKind = "empty", PreviewSourceId = string.Empty, VisualHash = string.Empty }, sharedBundle);
-                    return string.Empty;
-                }
-
-                string fileName = SanitizeFileName(AiNodeIdUtility.GetNodeId(converter, node));
-                if (string.IsNullOrWhiteSpace(fileName)) fileName = "node";
-
-                string outputPath = Path.Combine(sharedBundle.SharedNodePreviewDirectory, fileName + ".png");
-                outputPath = ExportTextureToPngIfMissing(previewTexture, outputPath, previewExportContext, NodePreviewTransparentPadding);
-                string projectRoot = previewExportContext != null && !string.IsNullOrWhiteSpace(previewExportContext.ProjectRoot)
-                    ? previewExportContext.ProjectRoot
-                    : Directory.GetParent(Application.dataPath).FullName;
-
-                var result = new NodePreviewExportResult
-                {
-                    PreviewImagePath = MakeRelativePath(projectRoot, outputPath),
-                    PreviewKind = previewKind,
-                    PreviewSourceId = string.Empty,
-                    VisualHash = ComputePreviewFileHash(sharedBundle, MakeRelativePath(projectRoot, outputPath))
-                };
-                StorePreviewResult(previewExportContext, node, result, sharedBundle);
-                return result.PreviewImagePath;
-            }
-            finally
-            {
-                if (ownsPreviewTexture && previewTexture != null)
-                {
-                    UnityEngine.Object.DestroyImmediate(previewTexture);
-                }
-            }
-        }
-
-        private static bool TryAcquirePreviewTexture(PsdLayerNode node, out Texture2D previewTexture, out bool ownsPreviewTexture, out string previewKind)
-        {
-            previewTexture = null;
-            ownsPreviewTexture = false;
-            previewKind = "empty";
-            if (node == null)
-            {
-                return false;
-            }
-
-            // AI 识别图像必须反映“当前节点树状态”，不能回退成原始 BindPsdLayer 的 LayerGroup 合图。
-            if (ShouldRenderPreviewFromCurrentNodeTree(node)
-                && TryRenderPreviewTextureFromCurrentNodeTree(node, out previewTexture))
-            {
-                ownsPreviewTexture = true;
-                previewKind = "composite";
-                return true;
-            }
-
-            if (!node.RefreshLayerTexture() || node.PreviewTexture == null)
-            {
-                return false;
-            }
-
-            previewTexture = node.PreviewTexture;
-            previewKind = node.BindPsdLayerIndex < 0 ? "generated" : "self";
-            return true;
-        }
-
-        private static bool ShouldRenderPreviewFromCurrentNodeTree(PsdLayerNode node)
-        {
-            return node != null
-                && node.LayerType == PsdLayerType.LayerGroup
-                && node.transform != null
-                && node.transform.childCount > 0;
-        }
-
-        private static bool TryRenderPreviewTextureFromCurrentNodeTree(PsdLayerNode node, out Texture2D texture)
-        {
-            texture = null;
-            var renderTree = node.BuildCurrentRenderTree();
-            var rendered = PsdLayerRenderer.RenderTree(
-                renderTree,
-                includeHiddenLayers: false,
-                applyClippingMasks: true,
-                isPreviewRender: true);
-            texture = CreateTextureFromRenderedImage(rendered);
-            return texture != null;
         }
 
         private static Texture2D CreateTextureFromRenderedImage(PsdRenderedImage rendered)
@@ -659,8 +278,8 @@ namespace UGF.EditorTools.Psd2UGUI
                 return null;
             }
 
-            TextureFormat textureFormat = rendered.IsHighBitDepth ? TextureFormat.RGBA64 : TextureFormat.RGBA32;
-            var texture = new Texture2D(rendered.Width, rendered.Height, textureFormat, false);
+            GraphicsFormat textureFormat = rendered.IsHighBitDepth ? GraphicsFormat.R16G16B16A16_UNorm : GraphicsFormat.R8G8B8A8_SRGB;
+            var texture = new Texture2D(rendered.Width, rendered.Height, textureFormat, TextureCreationFlags.None);
             texture.hideFlags = HideFlags.HideAndDontSave;
             texture.alphaIsTransparency = true;
             if (rendered.IsHighBitDepth)
@@ -679,78 +298,7 @@ namespace UGF.EditorTools.Psd2UGUI
             return texture;
         }
 
-        private static bool TryGetVisualPassthroughPreviewSource(PsdLayerNode node, out PsdLayerNode previewSource)
-        {
-            previewSource = null;
-            if (node == null || node.LayerType != PsdLayerType.LayerGroup
-                || (node.UIType != GUIType.Panel && node.UIType != GUIType.Null)
-                || node.CollapseChildrenForGeneration)
-                return false;
-
-            var layer = node.BindPsdLayer;
-            if (layer == null || !layer.IsPreviewPassthroughGroup())
-                return false;
-
-            PsdLayerNode onlyChild = null;
-            for (int i = 0; i < node.transform.childCount; i++)
-            {
-                var childNode = node.transform.GetChild(i).GetComponent<PsdLayerNode>();
-                if (childNode == null || !childNode.gameObject.activeSelf) continue;
-                if (childNode.BindPsdLayer != null && !childNode.BindPsdLayer.IsVisible) continue;
-                if (onlyChild != null) return false;
-                onlyChild = childNode;
-            }
-
-            previewSource = onlyChild;
-            return previewSource != null;
-        }
-
-        private static void StorePreviewResult(NodePreviewExportContext previewExportContext, PsdLayerNode node, NodePreviewExportResult result, SharedBundleContext sharedBundle)
-        {
-            if (previewExportContext == null || node == null) return;
-            previewExportContext.NodeResults[node] = result;
-            if (!string.IsNullOrWhiteSpace(result.PreviewImagePath))
-            {
-                string fullPath = Path.Combine(previewExportContext.ProjectRoot, result.PreviewImagePath).Replace("\\", "/");
-                previewExportContext.UsedPreviewPaths.Add(Path.GetFullPath(fullPath).Replace("\\", "/"));
-            }
-        }
-
-        private static int CountRenderableLeafLayers(PsdLayerNode node)
-        {
-            if (node == null)
-            {
-                return 0;
-            }
-
-            int childNodeCount = 0;
-            int descendantLeafCount = 0;
-            for (int i = 0; i < node.transform.childCount; i++)
-            {
-                var childNode = node.transform.GetChild(i).GetComponent<PsdLayerNode>();
-                if (childNode == null)
-                {
-                    continue;
-                }
-
-                childNodeCount++;
-                descendantLeafCount += CountRenderableLeafLayers(childNode);
-            }
-
-            if (node.BindPsdLayer == null)
-            {
-                return descendantLeafCount;
-            }
-
-            if (node.LayerType == PsdLayerType.LayerGroup && childNodeCount > 0)
-            {
-                return descendantLeafCount;
-            }
-
-            return descendantLeafCount > 0 ? descendantLeafCount : 1;
-        }
-
-        private static string ComputePreviewFileHash(SharedBundleContext sharedBundle, string relativeOrAbsolutePath)
+        private static string ComputeFileHash(string relativeOrAbsolutePath)
         {
             string projectRoot = Directory.GetParent(Application.dataPath).FullName;
             string resolvedPath = relativeOrAbsolutePath;
@@ -765,9 +313,9 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             using (var sha = SHA256.Create())
+            using (var stream = File.OpenRead(resolvedPath))
             {
-                byte[] bytes = File.ReadAllBytes(resolvedPath);
-                byte[] hash = sha.ComputeHash(bytes);
+                byte[] hash = sha.ComputeHash(stream);
                 var builder = new StringBuilder(hash.Length * 2);
                 for (int i = 0; i < hash.Length; i++)
                 {
@@ -788,13 +336,68 @@ namespace UGF.EditorTools.Psd2UGUI
             package.document.visualInputPaths.Clear();
             AddVisualInput(package.document.visualInputPaths, package.document.previewImagePath);
 
-            if (TryBuildAnnotatedPreview(package, sharedBundle, projectRoot, out var annotatedRelativePath))
-            {
-                package.document.annotatedPreviewImagePath = annotatedRelativePath;
-                AddVisualInput(package.document.visualInputPaths, annotatedRelativePath);
-            }
+            BuildAnnotatedPreview(package, sharedBundle, projectRoot);
+            AddVisualInput(package.document.visualInputPaths, package.document.annotatedPreviewImagePath);
 
             BuildNodeAtlases(package, sharedBundle, projectRoot);
+        }
+
+        private static void NormalizePackageImagePaths(AiAnalysisPackageDocument package)
+        {
+            if (package == null || package.document == null)
+            {
+                return;
+            }
+
+            package.document.imageRoot = "img";
+            package.document.previewImagePath = Path.GetFileName(package.document.previewImagePath ?? string.Empty);
+            package.document.annotatedPreviewImagePath = Path.GetFileName(package.document.annotatedPreviewImagePath ?? string.Empty);
+            package.document.nodePreviewDirectoryPath = "img";
+            package.document.nodeAtlasDirectoryPath = "img";
+
+            if (package.nodes == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < package.nodes.Count; i++)
+            {
+                var node = package.nodes[i];
+                if (node == null)
+                {
+                    continue;
+                }
+
+                node.imageFile = Path.GetFileName(node.imageFile ?? string.Empty);
+                if (node.atlas != null)
+                {
+                    node.atlas.page = Path.GetFileName(node.atlas.page ?? string.Empty);
+                }
+            }
+        }
+
+        private static void BuildAnnotatedPreview(AiAnalysisPackageDocument package, SharedBundleContext sharedBundle, string projectRoot)
+        {
+            var texture = LoadPngTexture(ResolveProjectRelativePath(projectRoot, package.document.previewImagePath));
+            // 标注图是可选证据：读不到就跳过，不能让整次识别输入构建失败。
+            if (texture == null) return;
+            try
+            {
+                foreach (var node in package.nodes)
+                {
+                    if (node.rect == null || node.rect.w <= 0 || node.rect.h <= 0 || string.IsNullOrEmpty(node.shortId)) continue;
+                    int x = Mathf.RoundToInt(node.rect.x), y = Mathf.RoundToInt(node.rect.y);
+                    DrawRect(texture, x, y, Mathf.RoundToInt(node.rect.w), Mathf.RoundToInt(node.rect.h), new Color32(255, 215, 64, 255));
+                    x = Mathf.Clamp(x, 0, Mathf.Max(0, texture.width - 38));
+                    y = Mathf.Clamp(y - 13, 0, Mathf.Max(0, texture.height - 13));
+                    FillRect(texture, x, y, 38, 13, new Color32(0, 0, 0, 190));
+                    DrawText(texture, node.shortId.ToUpperInvariant(), x + 3, y + 3, new Color32(255, 255, 255, 255), 1);
+                }
+                texture.Apply(false, false);
+                File.WriteAllBytes(sharedBundle.AnnotatedPreviewPath, texture.EncodeToPNG());
+                package.document.annotatedPreviewImagePath = MakeRelativePath(projectRoot, sharedBundle.AnnotatedPreviewPath);
+            }
+            finally { UnityEngine.Object.DestroyImmediate(texture); }
         }
 
         private static void AddVisualInput(List<string> visualInputPaths, string path)
@@ -810,51 +413,6 @@ namespace UGF.EditorTools.Psd2UGUI
             visualInputPaths.Add(path);
         }
 
-        private static bool TryBuildAnnotatedPreview(AiAnalysisPackageDocument package, SharedBundleContext sharedBundle, string projectRoot, out string relativePath)
-        {
-            relativePath = string.Empty;
-            string previewPath = ResolveProjectRelativePath(projectRoot, package.document.previewImagePath);
-            if (string.IsNullOrWhiteSpace(previewPath) || !File.Exists(previewPath)) return false;
-
-            var texture = LoadPngTexture(previewPath);
-            if (texture == null) return false;
-
-            try
-            {
-                var nodes = package.nodes;
-                if (nodes != null)
-                {
-                    for (int i = 0; i < nodes.Count; i++)
-                    {
-                        var node = nodes[i];
-                        if (node == null || node.rect == null || string.IsNullOrWhiteSpace(node.shortId)) continue;
-                        DrawRect(texture, Mathf.RoundToInt(node.rect.x), Mathf.RoundToInt(node.rect.y), Mathf.RoundToInt(node.rect.w), Mathf.RoundToInt(node.rect.h), new Color32(255, 215, 64, 255));
-                        DrawAnnotatedLabel(texture, node.shortId, Mathf.RoundToInt(node.rect.x), Mathf.RoundToInt(node.rect.y));
-                    }
-                }
-
-                Directory.CreateDirectory(Path.GetDirectoryName(sharedBundle.AnnotatedPreviewPath));
-                texture.Apply(false, false);
-                File.WriteAllBytes(sharedBundle.AnnotatedPreviewPath, texture.EncodeToPNG());
-                relativePath = MakeRelativePath(projectRoot, sharedBundle.AnnotatedPreviewPath);
-                return true;
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(texture);
-            }
-        }
-
-        private static void DrawAnnotatedLabel(Texture2D texture, string label, int rectX, int rectY)
-        {
-            if (texture == null || string.IsNullOrWhiteSpace(label)) return;
-            int x = Mathf.Clamp(rectX, 0, Mathf.Max(0, texture.width - AnnotatedLabelWidth));
-            int y = rectY - AnnotatedLabelHeight;
-            if (y < 0) y = Mathf.Clamp(rectY, 0, Mathf.Max(0, texture.height - AnnotatedLabelHeight));
-            FillRect(texture, x, y, AnnotatedLabelWidth, AnnotatedLabelHeight, new Color32(0, 0, 0, 190));
-            DrawText(texture, label.ToUpperInvariant(), x + 3, y + 3, new Color32(255, 255, 255, 255), 1);
-        }
-
         private static void BuildNodeAtlases(AiAnalysisPackageDocument package, SharedBundleContext sharedBundle, string projectRoot)
         {
             if (package == null || package.nodes == null || package.nodes.Count == 0 || sharedBundle == null)
@@ -862,29 +420,29 @@ namespace UGF.EditorTools.Psd2UGUI
                 return;
             }
 
-            if (!string.IsNullOrWhiteSpace(sharedBundle.AtlasDirectory) && Directory.Exists(sharedBundle.AtlasDirectory))
-            {
-                var oldFiles = Directory.GetFiles(sharedBundle.AtlasDirectory, "node-atlas-*.png", SearchOption.TopDirectoryOnly);
-                for (int i = 0; i < oldFiles.Length; i++)
-                {
-                    AiJobFileUtility.DeleteFileIfExists(oldFiles[i]);
-                }
-            }
             Directory.CreateDirectory(sharedBundle.AtlasDirectory);
-
+            var visualNodes = new List<AiAnalysisNodeEntry>();
+            foreach (var node in package.nodes)
+                if (!string.IsNullOrEmpty(node.imageFile) && (!node.isGroupLayer || node.renderLeafCount > 1)) visualNodes.Add(node);
             int cellsPerPage = AtlasColumns * AtlasRows;
-            int pageCount = (package.nodes.Count + cellsPerPage - 1) / cellsPerPage;
+            int pageCount = (visualNodes.Count + cellsPerPage - 1) / cellsPerPage;
             for (int page = 0; page < pageCount; page++)
             {
-                var atlas = new Texture2D(AtlasColumns * AtlasCellWidth, AtlasRows * AtlasCellHeight, TextureFormat.RGBA32, false);
-                FillRect(atlas, 0, 0, atlas.width, atlas.height, TransparentBlack);
+                var pageKey = new StringBuilder("atlas-v3|");
+                for (int j = page * cellsPerPage; j < Math.Min(visualNodes.Count, (page + 1) * cellsPerPage); j++)
+                    pageKey.Append(visualNodes[j].visualHash).Append('|').Append(visualNodes[j].shortId).Append('|');
+                string pageName = "a-" + ComputeSha256(pageKey.ToString()).Substring(0, 12) + ".png";
+                string atlasPath = Path.Combine(sharedBundle.AtlasDirectory, pageName);
+                bool cached = File.Exists(atlasPath);
+                var atlas = cached ? null : new Texture2D(AtlasColumns * AtlasCellWidth, AtlasRows * AtlasCellHeight, TextureFormat.RGBA32, false);
+                if (atlas != null) FillRect(atlas, 0, 0, atlas.width, atlas.height, TransparentBlack);
 
                 for (int cell = 0; cell < cellsPerPage; cell++)
                 {
                     int nodeIndex = page * cellsPerPage + cell;
-                    if (nodeIndex >= package.nodes.Count) break;
+                    if (nodeIndex >= visualNodes.Count) break;
 
-                    var node = package.nodes[nodeIndex];
+                    var node = visualNodes[nodeIndex];
                     int col = cell % AtlasColumns;
                     int row = cell / AtlasColumns;
                     int cellX = col * AtlasCellWidth;
@@ -898,7 +456,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     int labelW = AtlasCellWidth - AtlasCellPadding * 2;
                     int labelH = AtlasLabelHeight - 8;
 
-                    DrawRectThickness(atlas, cellX, cellY, AtlasCellWidth, AtlasCellHeight, AtlasGridBorderColor, AtlasGridBorderWidth);
+                    if (atlas != null) DrawRectThickness(atlas, cellX, cellY, AtlasCellWidth, AtlasCellHeight, AtlasGridBorderColor, AtlasGridBorderWidth);
 
                     if (node != null)
                     {
@@ -914,28 +472,29 @@ namespace UGF.EditorTools.Psd2UGUI
                             previewH = imageH;
                         }
 
-                        DrawNodePreviewIntoAtlas(atlas, node, projectRoot, package.document.nodePreviewDirectoryPath, previewX, previewY, previewW, previewH, out var actualImageRect);
-                        string pageName = $"node-atlas-{page:000}.png";
+                        var actualImageRect = new RectData();
+                        if (!cached) DrawNodePreviewIntoAtlas(atlas, node, projectRoot, package.document.nodePreviewDirectoryPath, previewX, previewY, previewW, previewH, out actualImageRect);
                         node.atlas = new AiAtlasRef
                         {
                             page = pageName,
                             cell = cell,
                             label = node.shortId ?? string.Empty,
-                            imageRect = actualImageRect,
+                            imageRect = new RectData { x = previewX, y = previewY, w = previewW, h = previewH },
                             labelRect = new RectData { x = labelX, y = labelY, w = labelW, h = labelH }
                         };
 
-                        string label = $"{node.shortId} {CompactLayerTypeLabel(node.layerType)} {CompactUiTypeLabel(node.uiType)}";
-                        DrawTextClipped(atlas, label.ToUpperInvariant(), labelX, labelY, labelW, new Color32(245, 245, 245, 255), 2);
+                        string label = $"{node.shortId} {CompactLayerTypeLabel(node.layerType)}";
+                        if (atlas != null) DrawTextClipped(atlas, label.ToUpperInvariant(), labelX, labelY, labelW, new Color32(245, 245, 245, 255), 2);
                     }
                 }
 
-                string atlasPath = Path.Combine(sharedBundle.AtlasDirectory, $"node-atlas-{page:000}.png");
-                ZeroTransparentPixels(atlas);
-                atlas.Apply(false, false);
-                File.WriteAllBytes(atlasPath, atlas.EncodeToPNG());
+
+                if (atlas != null)
+                {
+                    try { ZeroTransparentPixels(atlas); atlas.Apply(false, false); File.WriteAllBytes(atlasPath, atlas.EncodeToPNG()); }
+                    finally { UnityEngine.Object.DestroyImmediate(atlas); }
+                }
                 AddVisualInput(package.document.visualInputPaths, MakeRelativePath(projectRoot, atlasPath));
-                UnityEngine.Object.DestroyImmediate(atlas);
             }
         }
 
@@ -981,39 +540,6 @@ namespace UGF.EditorTools.Psd2UGUI
                 case "FillLayer": return "F";
                 case "Layer": return "L";
                 default: return layerType.Length > 3 ? layerType.Substring(0, 3) : layerType;
-            }
-        }
-
-        private static string CompactUiTypeLabel(string uiType)
-        {
-            if (string.IsNullOrWhiteSpace(uiType)) return "NULL";
-            switch (uiType)
-            {
-                case "Null": return "NULL";
-                case "Image": return "IMG";
-                case "RawImage": return "RAW";
-                case "Text": return "TXT";
-                case "Button": return "BTN";
-                case "Dropdown": return "DPD";
-                case "InputField": return "IPT";
-                case "Toggle": return "TGL";
-                case "Slider": return "SLD";
-                case "ScrollView": return "SV";
-                case "Mask": return "MSK";
-                case "FillColor": return "COL";
-                case "Panel": return "PNL";
-                case "ToggleGroup": return "TGG";
-                case "Background": return "BG";
-                case "Button_Text": return "BT_TXT";
-                case "Slider_Fill": return "SLD_FILL";
-                case "Slider_Handle": return "SLD_HDL";
-                case "Toggle_Checkmark": return "TG_MARK";
-                case "Toggle_Label": return "TG_LBL";
-                case "Dropdown_Label": return "DPD_LBL";
-                case "Dropdown_Arrow": return "DPD_ARR";
-                case "InputField_Placeholder": return "IPT_PH";
-                case "InputField_Text": return "IPT_TXT";
-                default: return uiType.Length > 8 ? uiType.Substring(0, 8) : uiType;
             }
         }
 
@@ -1333,10 +859,35 @@ namespace UGF.EditorTools.Psd2UGUI
             var files = Directory.GetFiles(directory, "*.png", SearchOption.TopDirectoryOnly);
             for (int i = 0; i < files.Length; i++)
             {
+                string fileName = Path.GetFileName(files[i]);
+                // Node previews share the flat img directory with preview and atlas
+                // assets. Only remove files produced from node IDs.
+                string sourceId = Path.GetFileNameWithoutExtension(fileName);
+                if (sourceId.Length < 4 || sourceId[0] != 'S'
+                    || !int.TryParse(sourceId.Substring(1), out _))
+                {
+                    continue;
+                }
                 string fullPath = Path.GetFullPath(files[i]).Replace("\\", "/");
                 if (!previewExportContext.UsedPreviewPaths.Contains(fullPath))
                     AiJobFileUtility.DeleteFileIfExists(files[i]);
             }
+        }
+
+        // 图集页按内容哈希命名，旧页不会被本轮引用；不清理就只在磁盘上越堆越多。
+        private static void CleanupUnusedAtlasPages(SharedBundleContext sharedBundle, AiAnalysisPackageDocument package)
+        {
+            if (sharedBundle == null || package == null || package.nodes == null) return;
+            string directory = sharedBundle.AtlasDirectory;
+            if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory)) return;
+
+            var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var node in package.nodes)
+                if (node.atlas != null && !string.IsNullOrEmpty(node.atlas.page))
+                    used.Add(Path.GetFileName(node.atlas.page));
+
+            foreach (string file in Directory.GetFiles(directory, "a-*.png", SearchOption.TopDirectoryOnly))
+                if (!used.Contains(Path.GetFileName(file))) AiJobFileUtility.DeleteFileIfExists(file);
         }
 
         private static string ExportTextureToPngIfMissing(Texture texture, string outputPath, NodePreviewExportContext previewExportContext = null, int transparentPadding = 0)
@@ -1485,7 +1036,7 @@ namespace UGF.EditorTools.Psd2UGUI
         private static string MakeRelativePath(string rootPath, string fullPath)
         {
             if (string.IsNullOrWhiteSpace(rootPath) || string.IsNullOrWhiteSpace(fullPath)) return string.Empty;
-            try { return Path.GetRelativePath(rootPath, fullPath).Replace("\\", "/"); }
+            try { return PathExtensions.GetRelativePath(rootPath, fullPath).Replace("\\", "/"); }
             catch { return fullPath.Replace("\\", "/"); }
         }
 
