@@ -55,25 +55,50 @@ namespace UGF.EditorTools.Psd2UGUI
             var bgCom = tgCom.targetGraphic as UnityEngine.UI.Image;
             if (bgCom != null)
             {
-                UGUIParser.SetRectTransform(background, bgCom);
-                UGUIParser.Instance.BindImage(background, bgCom);
+                UGUIParser.SetRectTransform(background != null ? background : LayerNode, bgCom);
+                BindOptionalControlImage(background, bgCom);
+                if (background == null) bgCom.raycastTarget = true;
             }
 
             var markCom = tgCom.graphic as UnityEngine.UI.Image;
             if (markCom != null)
             {
                 UGUIParser.SetRectTransform(checkmark, markCom);
-                UGUIParser.Instance.BindImage(checkmark, markCom);
+                BindOptionalControlImage(checkmark, markCom);
             }
 
-            var textCom = tgCom.transform.Find("Label")?.GetComponent<TextMeshProUGUI>();
-            if (textCom != null)
+            var textCom = tgCom.transform.Find("Label")?.GetComponent<TextMeshProUGUI>()
+                ?? tgCom.GetComponentInChildren<TextMeshProUGUI>(true);
+            if (textCom != null && label == null)
             {
-                textCom.gameObject.SetActive(label != null);
+                // 无标签图层:删除模板标签节点,保证 UI 纯净、无冗余节点
+                RetireGeneratedObject(textCom.gameObject);
+                textCom = null;
             }
+            if (textCom == null && label != null)
+            {
+                // 标签节点曾被删除(上一轮无标签图层),按模板重建
+                textCom = CreateTemplateLabel(uiRoot);
+            }
+            if (label != null && textCom != null) textCom.gameObject.SetActive(true);
             UGUIParser.SetTextStyle(label, textCom);
             UGUIParser.SetTextRectTransform(label, textCom);
             UGUIParser.SetTextRotation(label, textCom);
+            // 与 ToggleHelper 对齐：AI 权威时勾选态取素材可见性，否则生成的开关永远是关的。
+            if (LayerNode.IsAiAuthoritative)
+                tgCom.SetIsOnWithoutNotify(checkmark != null && checkmark.AiSourceVisible);
+        }
+
+        private TextMeshProUGUI CreateTemplateLabel(GameObject uiRoot)
+        {
+            var prefab = UGUIParser.Instance?.GetRule(LayerNode.UIType)?.UIPrefab;
+            var prefabLabel = prefab != null ? prefab.GetComponentInChildren<TextMeshProUGUI>(true) : null;
+            if (prefabLabel == null) return null;
+
+            var labelGo = Instantiate(prefabLabel.gameObject, uiRoot.transform, false);
+            labelGo.name = prefabLabel.gameObject.name;
+            labelGo.transform.SetAsLastSibling();
+            return labelGo.GetComponent<TextMeshProUGUI>();
         }
 
         internal override void OnUIParented(GameObject uiRoot)

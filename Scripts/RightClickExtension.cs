@@ -32,26 +32,34 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 var assetPath = AssetDatabase.GUIDToAssetPath(guid);
                 var texImporter = AssetImporter.GetAtPath(assetPath) as TextureImporter;
-                if (texImporter == null || texImporter.textureType != TextureImporterType.Sprite)
+                // Multiple/图集按整张图算 border 会污染全部子精灵，只处理 Single Sprite。
+                if (texImporter == null || texImporter.textureType != TextureImporterType.Sprite
+                    || texImporter.spriteImportMode != SpriteImportMode.Single)
                 {
                     continue;
                 }
 
                 var rawReadable = texImporter.isReadable;
-                if (!rawReadable)
+                try
                 {
-                    texImporter.isReadable = true;
+                    if (!rawReadable)
+                    {
+                        texImporter.isReadable = true;
+                        texImporter.SaveAndReimport();
+                    }
+
+                    var sprite = AssetDatabase.LoadAssetAtPath<Sprite>(assetPath);
+                    if (sprite != null && sprite.texture != null)
+                    {
+                        texImporter.spriteBorder = UGUIParser.CalculateTexture9SliceBorder(sprite.texture);
+                    }
+                }
+                finally
+                {
+                    // 中途抛异常也不能把资源的可读性留在改过的状态。
+                    texImporter.isReadable = rawReadable;
                     texImporter.SaveAndReimport();
                 }
-
-                var sprite = AssetDatabase.LoadAssetAtPath<Sprite>(assetPath);
-                if (sprite != null && sprite.texture != null)
-                {
-                    texImporter.spriteBorder = UGUIParser.CalculateTexture9SliceBorder(sprite.texture);
-                }
-
-                texImporter.isReadable = rawReadable;
-                texImporter.SaveAndReimport();
             }
         }
 
@@ -137,10 +145,23 @@ namespace UGF.EditorTools.Psd2UGUI
                 return false;
             }
 
+            if (border.x != left || border.y != bottom || border.z != right || border.w != top)
+            {
+                Debug.LogWarning($"Crop Minimal 9-Slice requires integer pixel borders: {assetPath}");
+                return false;
+            }
+
             string fullPath = GetAssetFullPath(assetPath);
             if (!File.Exists(fullPath))
             {
                 Debug.LogWarning($"Sprite file not found: {assetPath}");
+                return false;
+            }
+
+            // 裁剪固定走 RGBA32+EncodeToPNG，会把 16bit 导出量化成 8bit 而 userData 标记不变，直接跳过。
+            if (IsSixteenBitPng(fullPath))
+            {
+                Debug.LogWarning($"Crop Minimal 9-Slice 会把 16bit PNG 量化成 8bit，已跳过: {assetPath}");
                 return false;
             }
 
@@ -165,11 +186,12 @@ namespace UGF.EditorTools.Psd2UGUI
                     return false;
                 }
 
-                bool cropHorizontal = centerWidth > 1;
-                bool cropVertical = centerHeight > 1;
+                Color32[] sourcePixels = sourceTexture.GetPixels32();
+                bool cropHorizontal = centerWidth > 1 && PsdImageComparer.CanCollapse(sourcePixels, width, height, border, true);
+                bool cropVertical = centerHeight > 1 && PsdImageComparer.CanCollapse(sourcePixels, width, height, border, false);
                 if (!cropHorizontal && !cropVertical)
                 {
-                    Debug.LogWarning($"Sprite center area is already minimal: {assetPath}");
+                    Debug.LogWarning($"Sprite has no strictly repeated stretch band to collapse: {assetPath}");
                     return false;
                 }
 
@@ -178,7 +200,6 @@ namespace UGF.EditorTools.Psd2UGUI
                 int centerX = left + ((centerWidth - 1) / 2);
                 int centerY = bottom + ((centerHeight - 1) / 2);
 
-                Color32[] sourcePixels = sourceTexture.GetPixels32();
                 Color32[] targetPixels = new Color32[newWidth * newHeight];
                 for (int y = 0; y < newHeight; y++)
                 {
@@ -226,7 +247,9 @@ namespace UGF.EditorTools.Psd2UGUI
                     texImporter.SaveAndReimport();
                 }
 
+#if EFUN_DEBUG
                 Debug.Log($"Crop Minimal 9-Slice success: {assetPath} ({width}x{height} -> {newWidth}x{newHeight})");
+#endif
                 return true;
             }
             finally
@@ -262,6 +285,29 @@ namespace UGF.EditorTools.Psd2UGUI
 
             int stretchEndExclusive = stretchStart + stretchLength;
             return stretchEndExclusive + (targetIndex - stretchStart - 1);
+        }
+
+        private static bool IsSixteenBitPng(string fullPath)
+        {
+            try
+            {
+                using (var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    var header = new byte[25];
+                    if (stream.Read(header, 0, 25) != 25) return false;
+                    if (header[0] != 0x89 || header[1] != (byte)'P' || header[2] != (byte)'N' || header[3] != (byte)'G') return false;
+                    if (header[12] != (byte)'I' || header[13] != (byte)'H' || header[14] != (byte)'D' || header[15] != (byte)'R') return false;
+                    return header[24] == 16;
+                }
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (System.UnauthorizedAccessException)
+            {
+                return false;
+            }
         }
 
         private static byte[] EncodeTextureBytes(string assetPath, Texture2D texture)

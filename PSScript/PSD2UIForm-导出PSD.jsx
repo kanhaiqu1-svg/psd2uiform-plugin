@@ -5,6 +5,8 @@
 // 更新日期：2025-11-21
 // ============================================
 
+#target photoshop
+
 // ========== 配置选项 ==========
 var CONFIG = {
     // 调试模式：true = 只处理不导出不还原，false = 完整流程（处理->导出->还原）
@@ -320,7 +322,7 @@ function hasExplicitRasterizeAsImageTag(layerName) {
  * @param {Layer} layer - 要检查的图层
  * @returns {Boolean} - 是否需要栅格化
  */
-function hasLayerEffect(layer) {
+function hasLayerEffect(layer, stylesOnly) {
     try {
         var ref = new ActionReference();
         ref.putIdentifier(app.charIDToTypeID('Lyr '), layer.id);
@@ -433,6 +435,9 @@ function hasLayerEffect(layer) {
         // ===== 1. 检查图层特效 (Layer Effects/Styles) =====
         if (hasEnabledLayerStyles(desc)) {
             return true;
+        }
+        if (stylesOnly) {
+            return false;
         }
         
         // ===== 2. 检查图层蒙版 (Layer Mask) =====
@@ -682,7 +687,8 @@ function processLayers(layers, statusCallback, options) {
                     } catch(e) {}
                     if (isText) {
                         //if (convertToSmartObject(layer))
-                        if (hasExplicitRasterizeAsImageTag(layerName))
+                        if (hasExplicitRasterizeAsImageTag(layerName) ||
+                            (options.rasterizeTextFx && hasLayerEffect(layer, true)))
                         {
                             if( rasterizeLayerWithEffects(layer))
                                 stats.textConverted++;
@@ -886,6 +892,7 @@ function buildDefaultExportOptions(doc, artboards) {
         artboards: artboards || [],
         selectedArtboardIndexes: [],
         groupFxMode: GROUP_FX_MODE_KEEP_STRUCTURE,
+        rasterizeTextFx: false,
         skipHiddenLayers: CONFIG.SKIP_HIDDEN_LAYERS,
         debugMode: CONFIG.DEBUG_MODE
     };
@@ -961,6 +968,17 @@ function showExportOptionsDialog(doc, artboards) {
     var mergeGroupFxRadio = groupFxPanel.add("radiobutton", undefined, "合并带 FX 的 Group，完整保留组特效视觉");
     keepGroupFxRadio.value = true;
 
+    var textPanel = win.add("panel", undefined, "文本");
+    textPanel.orientation = "column";
+    textPanel.alignChildren = "fill";
+    var rasterizeTextFxCheck = textPanel.add("checkbox", undefined, "是否栅格化带有特效的文本？");
+    rasterizeTextFxCheck.value = options.rasterizeTextFx;
+    var textFxHint = textPanel.add("statictext", undefined,
+        "由于Unity文本功能有限，复杂PS文本效果无法100%还原， 启用开关后会把特效文本栅格化作为图片艺术字使用",
+        { multiline: true });
+    textFxHint.preferredSize = [480, 42];
+    rasterizeTextFxCheck.helpTip = textFxHint.text;
+
     var miscPanel = win.add("panel", undefined, "其他");
     miscPanel.orientation = "column";
     miscPanel.alignChildren = "left";
@@ -991,6 +1009,7 @@ function showExportOptionsDialog(doc, artboards) {
         options.exportSuffix = suffix;
         options.exportMode = artboardRadio.value ? "artboards" : "document";
         options.groupFxMode = mergeGroupFxRadio.value ? GROUP_FX_MODE_MERGE : GROUP_FX_MODE_KEEP_STRUCTURE;
+        options.rasterizeTextFx = rasterizeTextFxCheck.value;
         options.skipHiddenLayers = skipHiddenCheck.value;
         options.debugMode = debugCheck.value;
         options.selectedArtboardIndexes = [];
@@ -1019,9 +1038,12 @@ function showExportOptionsDialog(doc, artboards) {
 }
 
 function saveAsPSB(doc, saveFile) {
+    app.activeDocument = doc;
     var desc1 = new ActionDescriptor();
     var desc2 = new ActionDescriptor();
     desc2.putBoolean(stringIDToTypeID("maximizeCompatibility"), true);
+    desc2.putBoolean(charIDToTypeID("Lyrs"), true);
+    desc2.putBoolean(charIDToTypeID("AlpC"), true);
     desc1.putObject(charIDToTypeID("As  "), charIDToTypeID("Pht8"), desc2);
     desc1.putPath(charIDToTypeID("In  "), saveFile instanceof File ? saveFile : new File(saveFile));
     desc1.putBoolean(charIDToTypeID("LwCs"), true);
@@ -1033,8 +1055,14 @@ function buildExportFile(outputFolderPath, baseName, suffix) {
 }
 
 function exportPSDToFile(doc, saveFile) {
+    app.activeDocument = doc;
     if (!/\.(psd|psb)$/i.test(saveFile.name)) {
         saveFile = new File(saveFile.fsName + ".psd");
+    }
+
+    // PSD 每边最多 30000px；PSB 在 PS 2019 及之后均支持大尺寸文档。
+    if (doc.width.as("px") > 30000 || doc.height.as("px") > 30000) {
+        saveFile = replaceFileExtension(saveFile, ".psb");
     }
 
     if (/\.psb$/i.test(saveFile.name)) {
@@ -1046,7 +1074,8 @@ function exportPSDToFile(doc, saveFile) {
     }
 
     try {
-        doc.saveAs(saveFile, buildPhotoshopSaveOptions(), true, Extension.LOWERCASE);
+        // 这里只保存工作副本。asCopy=false 避免 PS 22.4+ 的“副本”文件名偏好影响输出名。
+        doc.saveAs(saveFile, buildPhotoshopSaveOptions(), false, Extension.LOWERCASE);
         if (saveFile.parent) {
             saveLastExportFolderPath(saveFile.parent.fsName || saveFile.parent.fullName);
         }

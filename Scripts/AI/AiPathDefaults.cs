@@ -21,14 +21,8 @@ namespace UGF.EditorTools.Psd2UGUI
     internal static class AiPathDefaults
     {
         internal const string PluginRootFolderName = "PSD2UIForm";
-        internal const string JobsRootRelative = "Library/Psd2UIForm/AiJobs";
-        internal const string SharedRootRelative = "Library/Psd2UIForm/AiShared";
-        internal const string UiHelpersDirectoryRelative = "Scripts/UIHelpers";
-        internal const string OrchestratorPromptTemplateRelative = "AIPrompts/OrchestratorPrompt.md";
+        internal const string JobsRootRelative = "Library/Psd2UIForm";
         internal const string CombinedRecognitionPromptTemplateRelative = "AIPrompts/TaskPrompt.md";
-        internal const string MainTypePromptTemplateRelative = "AIPrompts/MainTypePrompt.md";
-        internal const string ChildRelationPromptTemplateRelative = "AIPrompts/ChildRelationPrompt.md";
-        internal const string StructuralPromptTemplateRelative = "AIPrompts/StructuralPrompt.md";
 
         internal static string ToAbsoluteProjectPath(string projectRoot, string relativePath)
         {
@@ -76,7 +70,7 @@ namespace UGF.EditorTools.Psd2UGUI
             string normalizedPath = string.IsNullOrWhiteSpace(psdAssetPath)
                 ? string.Empty
                 : psdAssetPath.Trim().Replace("\\", "/");
-            string fileName = Path.GetFileName(normalizedPath);
+            string fileName = Path.GetFileNameWithoutExtension(normalizedPath);
             if (string.IsNullOrWhiteSpace(fileName))
             {
                 fileName = "psd";
@@ -94,7 +88,21 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             string safeName = new string(chars).Trim();
-            return string.IsNullOrWhiteSpace(safeName) ? "psd" : safeName;
+            if (string.IsNullOrWhiteSpace(safeName)) safeName = "psd";
+            // 仅按文件名分目录会让不同目录下的同名 PSD 互覆缓存/作业，追加路径稳定后缀。
+            return $"{safeName}-{GetStableToken(normalizedPath.ToLowerInvariant())}";
+        }
+
+        internal static string GetStableToken(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "0";
+            using (var sha = System.Security.Cryptography.SHA1.Create())
+            {
+                byte[] hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(value));
+                var builder = new System.Text.StringBuilder(8);
+                for (int i = 0; i < 4; i++) builder.Append(hash[i].ToString("x2"));
+                return builder.ToString();
+            }
         }
 
         internal static string GetPluginRootAssetPath()

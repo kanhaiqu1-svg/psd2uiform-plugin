@@ -58,13 +58,13 @@ namespace UGF.EditorTools.Psd2UGUI
                 return;
             }
 
-            UGUIParser.SetRectTransform(background, input);
+            UGUIParser.SetRectTransform(background != null ? background : LayerNode, input);
 
             var bgImage = input.targetGraphic as Image ?? uiRoot.GetComponent<Image>();
             if (bgImage != null)
             {
                 input.targetGraphic = bgImage;
-                UGUIParser.Instance.BindImage(background, bgImage);
+                BindOptionalControlImage(background, bgImage);
             }
 
             var placeholderText = input.placeholder as TextMeshProUGUI;

@@ -40,6 +40,12 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             if (LayerNode.UIType != GUIType.FillColor && LayerNode.LayerType != PsdLayerType.FillLayer)
             {
+                if (LayerNode.IsAiAuthoritative) throw new System.InvalidOperationException("AI 声明与 Helper 输入不匹配；保留类型和素材绑定。");
+                if (ParsingFromOnEnable)
+                {
+                    DeferTypeFallback(UGUIParser.Instance.DefaultImage);
+                    return;
+                }
                 LayerNode.SetUIType(UGUIParser.Instance.DefaultImage);
                 return;
             }
@@ -49,7 +55,13 @@ namespace UGF.EditorTools.Psd2UGUI
         protected override void InitUIElements(GameObject uiRoot)
         {
             var imgCom = uiRoot.GetComponentInChildren<UnityEngine.UI.RawImage>();
+            if (imgCom == null)
+            {
+                Debug.LogWarning($"FillColor 模板缺少 RawImage，已跳过填充色绑定: {uiRoot.name}");
+                return;
+            }
             UGUIParser.SetRectTransform(fillColor, imgCom);
+            if (fillColor.IsAiAuthoritative) PsdGeneratedDrawOrder.Register(fillColor, imgCom);
             imgCom.color = UGUIParser.LayerNode2Color(fillColor, imgCom.color);
         }
     }

@@ -23,6 +23,12 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
+#if UNITY_6000_3_OR_NEWER
+using PsdObjectId = UnityEngine.EntityId;
+#else
+using PsdObjectId = System.Int32;
+#endif
+using UnityEngine.Experimental.Rendering;
 using UnityEditor;
 using UnityEditorInternal;
 using System.IO;
@@ -89,11 +95,11 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
                 EditorGUILayout.EndHorizontal();
             }
-            if (targetLogic.IsMainUIType && GUILayout.Button("生成当前节点UIForm"))
+            if (GUILayout.Button("更新此节点到已生成 UIForm"))
             {
                 Psd2UIFormConverter.Instance.GenerateUIForm(targetLogic);
             }
-            if (GUILayout.Button("导出Prefab"))
+            if (GUILayout.Button("导出为独立 prefab"))
             {
                 Psd2UIFormConverter.Instance.ExportAsPrefab(targetLogic);
             }
@@ -368,17 +374,17 @@ namespace UGF.EditorTools.Psd2UGUI
     [ExecuteInEditMode]
     [DisallowMultipleComponent]
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = false)]
-    public sealed class PsdLayerNode : MonoBehaviour
+    public sealed partial class PsdLayerNode : MonoBehaviour
     {
         private static
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             EntityId
 #else
             int
 #endif
             GetObjectId(UnityEngine.Object obj)
         {
-#if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_3_OR_NEWER
             return obj.GetEntityId();
 #else
             return obj.GetInstanceID();
@@ -397,12 +403,59 @@ namespace UGF.EditorTools.Psd2UGUI
         [HideInInspector][SerializeField] internal float ExportResizeRatio = 1.0f; // Fatcat定制: R后缀缩放倍率
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [HideInInspector][SerializeField] string generatedNodeId;
+        [HideInInspector][SerializeField] private string persistentId;
+        [HideInInspector][SerializeField] private bool missingSource;
+        [HideInInspector][SerializeField] private bool unassignedSource;
+        [HideInInspector][SerializeField] private string sourceGeneratedName;
+        [HideInInspector][SerializeField] private int sourceParentLayerId;
+        [HideInInspector][SerializeField] private bool sourceParentKnown, sourceVisible;
+        internal string PersistentId
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(persistentId)) { persistentId = Guid.NewGuid().ToString("N"); EditorUtility.SetDirty(this); }
+                return persistentId;
+            }
+        }
+        internal bool HasMissingSource => missingSource;
+        internal bool IsUnassignedSource => unassignedSource;
+        internal int[] AiSourceLayerIds => aiSourceLayerIds;
+
+        internal void SynchronizeSource(PsdLayerNode source)
+        {
+            BindPsdLayerIndex = source.BindPsdLayerIndex;
+            bindPsdLayerId = source.bindPsdLayerId;
+            mLayerType = source.mLayerType;
+            if (name == sourceGeneratedName) name = source.name;
+            sourceGeneratedName = source.name;
+            if (gameObject.activeSelf == sourceVisible) gameObject.SetActive(source.gameObject.activeSelf);
+            sourceVisible = source.gameObject.activeSelf;
+            sourceLayerName = source.sourceLayerName;
+            BindPsdLayer = source.BindPsdLayer;
+            missingSource = false;
+            UpdateLayerRectData(source.LayerRect);
+        }
+
+        internal void MarkUnassignedSource() { unassignedSource = true; UIType = GUIType.Null; markToExport = false; }
+        internal void MarkMissingSource() { missingSource = true; BindPsdLayerIndex = -1; BindPsdLayer = null; markToExport = false; RemoveUIHelper(); }
+        internal void CaptureSourcePresentation() { sourceGeneratedName = name; sourceVisible = gameObject.activeSelf; }
+        internal void SynchronizeSourceParent(Transform parent, int parentLayerId)
+        {
+            var currentParent = transform.parent != null ? transform.parent.GetComponent<PsdLayerNode>() : null;
+            int currentId = currentParent != null ? currentParent.bindPsdLayerId : 0;
+            if (!sourceParentKnown || currentId == sourceParentLayerId)
+                Undo.SetTransformParent(transform, parent, "Synchronize PSD hierarchy");
+            sourceParentLayerId = parentLayerId;
+            sourceParentKnown = true;
+        }
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [HideInInspector][SerializeField] internal GUIType UIType;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [HideInInspector][SerializeField] internal bool collapseChildrenForGeneration;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [HideInInspector][SerializeField] internal int textSourceBindPsdLayerIndex = -1;
+        [HideInInspector][SerializeField] internal int bindPsdLayerId = -1;
+        [HideInInspector][SerializeField] internal int textSourceBindPsdLayerId = -1;
         [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true)]
         [HideInInspector][SerializeField] private bool rasterizeGroupForOpacity;
         internal Texture2D PreviewTexture { get; private set; }
@@ -412,6 +465,7 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             get
             {
+                if (IsAiTarget && (aiExplicitRect || HasAiSources)) return aiBounds;
                 if (ShouldUseDerivedLayerRect() && TryCalculateDerivedLayerRect(out var derivedRect))
                 {
                     return derivedRect;
@@ -435,6 +489,7 @@ namespace UGF.EditorTools.Psd2UGUI
             }
         }
         internal string GeneratedNodeId => generatedNodeId;
+        internal void SetAiDeliveryId(string id) { generatedNodeId = id; }
         internal bool IsMainUIType => rasterizeGroupForOpacity || UGUIParser.IsMainUIType(UIType);
         internal bool HasReuseReference => !string.IsNullOrEmpty(ReuseTargetKey);
         internal bool HasReusePrefabReference => !string.IsNullOrEmpty(ReusePrefabKey);
@@ -442,15 +497,57 @@ namespace UGF.EditorTools.Psd2UGUI
         internal string ReuseTargetDisplayName => TryGetReuseTargetName(out var targetName) ? targetName : null;
         internal string ReusePrefabKey => TryGetReusePrefabName(out var targetName) ? NormalizeReferencePath(targetName) : null;
         internal string ReusePrefabDisplayName => TryGetReusePrefabName(out var targetName) ? targetName : null;
-        internal string LayerNameLookupKey => NormalizeLayerName(gameObject?.name, preserveRefTags: true);
-        internal bool PreferHighBitDepthAsset => PsdReaderProductAccess.IsAvailable && BindPsdLayer != null && BindPsdLayer.Document != null && BindPsdLayer.Document.Depth == 16;
+        internal string LayerNameLookupKey => ResourceName;
+        internal string ResourceName => IsAiTarget && !string.IsNullOrEmpty(aiResourceName)
+            ? aiResourceName : PsdResourceNaming.LayerName(IsAiTarget ? name : GetReferenceSourceName());
         internal bool CollapseChildrenForGeneration => collapseChildrenForGeneration;
         internal bool RasterizeGroupForOpacity => rasterizeGroupForOpacity;
+        [HideInInspector][SerializeField] private bool aiAuthoritative;
+        [HideInInspector][SerializeField] private bool aiExplicitRect;
+        [HideInInspector][SerializeField] private int[] aiSourceIndices = Array.Empty<int>();
+        [HideInInspector][SerializeField] private int[] aiSourceLayerIds = Array.Empty<int>();
+        [HideInInspector][SerializeField] private string aiResourceName;
+        [HideInInspector][SerializeField] private string aiReferenceKind;
+        [HideInInspector][SerializeField] private string aiReferenceKey;
+        [HideInInspector][SerializeField] private Rect aiBounds;
+        [HideInInspector][SerializeField] private bool aiOwnerReady = true;
+        [HideInInspector][SerializeField] private float aiTextAncestorOpacity = 1f;
+        internal float AiTextAncestorOpacity => aiTextAncestorOpacity;
+        [HideInInspector][SerializeField] private bool aiSourceVisible = true;
+        internal bool AiSourceVisible => aiSourceVisible;
+        private PsdLayerRenderNode aiRenderTree;
+        internal bool IsAiTarget => aiAuthoritative && BindPsdLayerIndex < 0;
+        internal bool HasAiSources
+        {
+            get { foreach (int index in aiSourceIndices) if (index >= 0) return true; return false; }
+        }
+        internal int[] AiSourceIndices => aiSourceIndices;
+        internal bool HasAiSource(int index) => Array.IndexOf(aiSourceIndices, index) >= 0;
+        internal int RenderOrderSourceIndex
+        {
+            get {
+                if (!IsAiTarget) return BindPsdLayerIndex >= 0 ? BindPsdLayerIndex : int.MaxValue;
+                int first = int.MaxValue;
+                foreach (int index in aiSourceIndices) if (index >= 0 && index < first) first = index;
+                return first;
+            }
+        }
+        internal bool IsAiReady => !IsAiTarget || aiOwnerReady && (HasReusePrefabReference ? HasAiSources : AiUiContract.IsText(UIType) ? aiTextReady
+            && LayerRect.width > 0 && LayerRect.height > 0 : HasAiSources
+            || (AiUiContract.IsContainer(UIType) || UIType == GUIType.ScrollView_Viewport && aiExplicitRect)
+            && LayerRect.width > 0 && LayerRect.height > 0);
+        internal bool IsAiAuthoritative => aiAuthoritative;
         internal bool BakesGroupOpacityIntoGeneratedImage => LayerType == PsdLayerType.LayerGroup
             && collapseChildrenForGeneration
             && textSourceBindPsdLayerIndex < 0;
         internal float SourceOpacity => BindPsdLayer != null ? BindPsdLayer.Opacity : 1f;
         internal PsdLayer GroupTextSourcePsdLayer => mTextSourcePsdLayer;
+
+        internal bool TryGetSourceLayerId(out int layerId)
+        {
+            layerId = 0;
+            return BindPsdLayer != null && BindPsdLayer.TryGetLayerId(out layerId);
+        }
         private WeakReference<PsdLayerNode> reuseTargetRef = null;
         private string previewCacheKey;
         /// <summary>
@@ -525,16 +622,7 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         internal static string NormalizeReferencePath(string rawPath)
         {
-            if (string.IsNullOrWhiteSpace(rawPath)) return null;
-            var workingPath = rawPath.Trim();
-            var parser = UGUIParser.Instance;
-            if (parser != null && parser.ConvertZh2En)
-            {
-                workingPath = LayerNameUtility.ConvertChineseToLetters(workingPath);
-            }
-
-            var sanitizedPath = LayerNameUtility.SanitizeRelativePath(workingPath);
-            return string.IsNullOrWhiteSpace(sanitizedPath) ? null : sanitizedPath;
+            return PsdResourceNaming.ReferenceKey(rawPath);
         }
 
         internal static string GetReferenceLeafName(string referencePath, string fallbackName = null)
@@ -556,8 +644,10 @@ namespace UGF.EditorTools.Psd2UGUI
         internal void ConfigureGeneratedGroupNode(string layerName, Rect layerRect, string nodeId = null)
         {
             BindPsdLayerIndex = -1;
+            bindPsdLayerId = -1;
             markToExport = false;
             textSourceBindPsdLayerIndex = -1;
+            textSourceBindPsdLayerId = -1;
             SetGroupGenerationState(false, -1);
 
             mLayerType = PsdLayerType.LayerGroup;
@@ -565,6 +655,143 @@ namespace UGF.EditorTools.Psd2UGUI
             generatedNodeId = nodeId ?? string.Empty;
             UpdateLayerRectData(layerRect);
         }
+
+        internal void ConfigureAiDeclaration(GUIType type, Rect? explicitRect, bool ownerReady)
+        {
+            aiAuthoritative = true;
+            aiOwnerReady = ownerReady;
+            aiExplicitRect = explicitRect.HasValue;
+            if (explicitRect.HasValue) aiBounds = explicitRect.Value;
+            rasterizeGroupForOpacity = false;
+            SetUIType(type, false);
+            UpdateAiBinding(null);
+        }
+
+        internal void AddAiSource(int sourceIndex, PsdDocument document)
+        {
+            if (!HasAiSource(sourceIndex))
+            {
+                AlignAiSourceLayerIds(document);
+                Array.Resize(ref aiSourceIndices, aiSourceIndices.Length + 1);
+                aiSourceIndices[aiSourceIndices.Length - 1] = sourceIndex;
+                Array.Resize(ref aiSourceLayerIds, aiSourceLayerIds.Length + 1);
+                aiSourceLayerIds[aiSourceLayerIds.Length - 1] = ResolveLayerId(document, sourceIndex);
+            }
+            UpdateAiBinding(document);
+        }
+
+        internal void RemoveAiSource(int index, PsdDocument document)
+        {
+            int position = Array.IndexOf(aiSourceIndices, index);
+            if (position < 0) return;
+            AlignAiSourceLayerIds(document);
+            var remaining = new int[aiSourceIndices.Length - 1];
+            var remainingIds = new int[aiSourceLayerIds.Length - 1];
+            Array.Copy(aiSourceIndices, 0, remaining, 0, position);
+            Array.Copy(aiSourceIndices, position + 1, remaining, position, remaining.Length - position);
+            Array.Copy(aiSourceLayerIds, 0, remainingIds, 0, position);
+            Array.Copy(aiSourceLayerIds, position + 1, remainingIds, position, remainingIds.Length - position);
+            aiSourceIndices = remaining;
+            aiSourceLayerIds = remainingIds;
+            UpdateAiBinding(document);
+        }
+
+        private static int ResolveLayerId(PsdDocument document, int sourceIndex)
+        {
+            var layer = document != null ? document.GetLayerByFlatIndex(sourceIndex) : null;
+            return layer != null && layer.TryGetLayerId(out int layerId) && layerId > 0 ? layerId : -1;
+        }
+
+        private void AlignAiSourceLayerIds(PsdDocument document)
+        {
+            if (aiSourceLayerIds.Length == aiSourceIndices.Length) return;
+            var ids = new int[aiSourceIndices.Length];
+            for (int i = 0; i < ids.Length; i++)
+                ids[i] = i < aiSourceLayerIds.Length ? aiSourceLayerIds[i] : ResolveLayerId(document, aiSourceIndices[i]);
+            aiSourceLayerIds = ids;
+        }
+
+        // Sources outlive their position: after the PSD gains, loses or reorders layers the stored
+        // flat indexes point at whoever happens to sit there now, so follow lyid instead.
+        private void RealignSourceLayerIndexes(PsdDocument document)
+        {
+            var indexById = document.GetLayerIndexByIdMap();
+            if (indexById == null) return;
+            if (bindPsdLayerId > 0)
+                BindPsdLayerIndex = indexById.TryGetValue(bindPsdLayerId, out int bound) ? bound : -1;
+            if (textSourceBindPsdLayerId > 0)
+                textSourceBindPsdLayerIndex = indexById.TryGetValue(textSourceBindPsdLayerId, out int textIndex) ? textIndex : -1;
+            if (aiTextStyleLayerId > 0)
+                aiTextStyleIndex = indexById.TryGetValue(aiTextStyleLayerId, out int styleIndex) ? styleIndex : -1;
+            if (aiSourceLayerIds.Length != aiSourceIndices.Length) return;
+            for (int i = 0; i < aiSourceIndices.Length; i++)
+            {
+                if (aiSourceLayerIds[i] > 0)
+                    aiSourceIndices[i] = indexById.TryGetValue(aiSourceLayerIds[i], out int sourceIndex) ? sourceIndex : -1;
+            }
+        }
+
+        private void UpdateAiBinding(PsdDocument document)
+        {
+            ReleasePreviewTexture();
+            if (aiSourceIndices.Length != 1) SetAiResourceMetadata(null, null, null);
+            else if (document != null)
+            {
+                string sourceName = document.GetLayerByFlatIndex(aiSourceIndices[0])?.Name;
+                PsdResourceNaming.Parse(sourceName, out var kind, out var key);
+                SetAiResourceMetadata(sourceName, kind, key);
+            }
+            bool text = AiUiContract.IsText(UIType);
+            bool nativeText = text && aiText?.mode == "source";
+            textSourceBindPsdLayerIndex = nativeText && HasAiSources ? aiSourceIndices[0]
+                : text && aiText?.mode == "value" ? aiTextStyleIndex : -1;
+            // 只有两份数组等长时才可信；旧资产的 id 数组可能缺失，错配会把文本源指到别的图层。
+            textSourceBindPsdLayerId = nativeText && HasAiSources && aiSourceLayerIds.Length == aiSourceIndices.Length
+                ? aiSourceLayerIds[0] : text && aiText?.mode == "value" ? aiTextStyleLayerId : -1;
+            mTextSourcePsdLayer = textSourceBindPsdLayerIndex >= 0 ? document?.GetLayerByFlatIndex(textSourceBindPsdLayerIndex) : null;
+            if (document != null)
+            {
+                aiTextAncestorOpacity = nativeText ? mTextSourcePsdLayer?.AncestorOpacity ?? 1f : 1f;
+            }
+            bool styleAvailable = mTextSourcePsdLayer != null && mTextSourcePsdLayer.TryGetTextLayerInfo(out var info)
+                && info.StyleRuns != null && info.StyleRuns.Length > 0;
+            aiTextReady = text && (nativeText ? styleAvailable : aiText?.mode == "value"
+                && (styleAvailable || aiText.style?.IsComplete == true));
+            // AI children are independent target elements, not the PSD layers being rendered.
+            collapseChildrenForGeneration = false;
+            markToExport = aiOwnerReady && HasAiSources && !text && UIType != GUIType.Null
+                && !HasReuseReference && !HasReusePrefabReference;
+            aiRenderTree = document == null ? null : AiSourceRenderTree.Build(document, aiSourceIndices);
+            if (document != null)
+            {
+                aiSourceVisible = !HasAiSources;
+                foreach (int index in aiSourceIndices)
+                    if (document.GetLayerByFlatIndex(index)?.IsVisibleInHierarchy == true) { aiSourceVisible = true; break; }
+            }
+            if (!aiExplicitRect && document != null && HasAiSources)
+            {
+                float left = float.PositiveInfinity, top = float.PositiveInfinity, right = float.NegativeInfinity, bottom = float.NegativeInfinity;
+                foreach (int index in aiSourceIndices)
+                {
+                    var layer = document.GetLayerByFlatIndex(index);
+                    if (layer == null) continue;
+                    left = Mathf.Min(left, layer.Left); top = Mathf.Min(top, layer.Top);
+                    right = Mathf.Max(right, layer.Right); bottom = Mathf.Max(bottom, layer.Bottom);
+                }
+                if (!float.IsInfinity(left)) aiBounds = new Rect((left + right - document.Width) * .5f, (document.Height - top - bottom) * .5f, right - left, bottom - top);
+            }
+        }
+
+        internal void SetAiResourceMetadata(string sourceName, string kind, string key)
+        {
+            aiResourceName = string.IsNullOrEmpty(sourceName) ? null : PsdResourceNaming.LayerName(sourceName);
+            aiReferenceKind = kind;
+            aiReferenceKey = key;
+            if (!string.IsNullOrEmpty(key)) markToExport = false;
+        }
+
+        internal string[] GetAiRenderIssues(PsdDocument document)
+            => document == null || !HasAiSources ? Array.Empty<string>() : AiSourceRenderTree.FindCompositionIssues(document, aiSourceIndices);
 
         internal void SetGeneratedNodeId(string nodeId)
         {
@@ -576,9 +803,28 @@ namespace UGF.EditorTools.Psd2UGUI
             LayerRect = layerRect;
         }
 
+        internal static void GetLayerRectVisualBounds(Rect rect, out float xMin, out float yMin, out float xMax, out float yMax)
+        {
+            float halfWidth = rect.width * 0.5f;
+            float halfHeight = rect.height * 0.5f;
+            xMin = rect.position.x - halfWidth;
+            yMin = rect.position.y - halfHeight;
+            xMax = rect.position.x + halfWidth;
+            yMax = rect.position.y + halfHeight;
+        }
+
+        internal static Rect CreateLayerRectFromVisualBounds(float xMin, float yMin, float xMax, float yMax)
+        {
+            return new Rect(
+                (xMin + xMax) * 0.5f,
+                (yMin + yMax) * 0.5f,
+                xMax - xMin,
+                yMax - yMin);
+        }
+
         private bool ShouldUseDerivedLayerRect()
         {
-            return BindPsdLayer == null
+            return !aiExplicitRect && BindPsdLayer == null
                 && BindPsdLayerIndex < 0
                 && LayerType == PsdLayerType.LayerGroup;
         }
@@ -602,20 +848,24 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
 
                 var rect = childNode.LayerRect;
+                // Empty geometry (including unbound AI declarations) contributes no visual bounds.
+                if (rect.width <= 0f || rect.height <= 0f) continue;
+
+                GetLayerRectVisualBounds(rect, out float minX, out float minY, out float maxX, out float maxY);
                 if (!hasAny)
                 {
-                    xMin = rect.xMin;
-                    yMin = rect.yMin;
-                    xMax = rect.xMax;
-                    yMax = rect.yMax;
+                    xMin = minX;
+                    yMin = minY;
+                    xMax = maxX;
+                    yMax = maxY;
                     hasAny = true;
                     continue;
                 }
 
-                xMin = Mathf.Min(xMin, rect.xMin);
-                yMin = Mathf.Min(yMin, rect.yMin);
-                xMax = Mathf.Max(xMax, rect.xMax);
-                yMax = Mathf.Max(yMax, rect.yMax);
+                xMin = Mathf.Min(xMin, minX);
+                yMin = Mathf.Min(yMin, minY);
+                xMax = Mathf.Max(xMax, maxX);
+                yMax = Mathf.Max(yMax, maxY);
             }
 
             if (!hasAny)
@@ -623,7 +873,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 return false;
             }
 
-            bounds = Rect.MinMaxRect(xMin, yMin, xMax, yMax);
+            bounds = CreateLayerRectFromVisualBounds(xMin, yMin, xMax, yMax);
             return true;
         }
 
@@ -672,6 +922,7 @@ namespace UGF.EditorTools.Psd2UGUI
         private bool TryGetReuseTargetName(out string targetName)
         {
             targetName = null;
+            if (aiAuthoritative) { targetName = aiReferenceKind == "ref" ? aiReferenceKey : null; return !string.IsNullOrEmpty(targetName); }
             var workingName = GetReferenceSourceName();
             if (string.IsNullOrWhiteSpace(workingName)) return false;
 
@@ -689,6 +940,7 @@ namespace UGF.EditorTools.Psd2UGUI
         private bool TryGetReusePrefabName(out string targetName)
         {
             targetName = null;
+            if (aiAuthoritative) { targetName = aiReferenceKind == "refp" ? aiReferenceKey : null; return !string.IsNullOrEmpty(targetName); }
             var workingName = GetReferenceSourceName();
             if (string.IsNullOrWhiteSpace(workingName)) return false;
 
@@ -710,8 +962,8 @@ namespace UGF.EditorTools.Psd2UGUI
         }
         internal void SetUIType(GUIType uiType, bool triggerParseFunc = true)
         {
-            var parser = UGUIParser.Instance;
-            this.UIType = parser != null ? parser.ResolvePreferredUIType(uiType) : uiType;
+            unassignedSource = false;
+            this.UIType = ResolvePreferredType(uiType);
             RemoveUIHelper();
 
             if (triggerParseFunc)
@@ -727,10 +979,17 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
             }
         }
-        internal void SetGroupGenerationState(bool collapseChildren, int textSourceIndex)
+        internal GUIType ResolvePreferredType(GUIType type)
+        {
+            var parser = UGUIParser.Instance;
+            if (parser == null) return type;
+            return parser.ResolvePreferredUIType(type, aiAuthoritative ? null : GetReferenceSourceName(), LayerType);
+        }
+        internal void SetGroupGenerationState(bool collapseChildren, int textSourceIndex, int textSourceLayerId = -1)
         {
             collapseChildrenForGeneration = collapseChildren;
             textSourceBindPsdLayerIndex = textSourceIndex;
+            textSourceBindPsdLayerId = textSourceIndex >= 0 ? textSourceLayerId : -1;
             mTextSourcePsdLayer = null;
             if (textSourceBindPsdLayerIndex >= 0)
             {
@@ -747,15 +1006,16 @@ namespace UGF.EditorTools.Psd2UGUI
 
             collapseChildrenForGeneration = true;
             textSourceBindPsdLayerIndex = -1;
+            textSourceBindPsdLayerId = -1;
             mTextSourcePsdLayer = null;
         }
         internal void RefreshUIHelper(bool refreshParent = false)
         {
+            if (missingSource || unassignedSource) { RemoveUIHelper(); return; }
+            if (IsAiAuthoritative && HasReusePrefabReference) { RemoveUIHelper(); return; }
+            if (IsAiTarget && !IsAiReady) { RemoveUIHelper(); return; }
             var parser = UGUIParser.Instance;
-            if (parser != null)
-            {
-                UIType = parser.ResolvePreferredUIType(UIType);
-            }
+            UIType = ResolvePreferredType(UIType);
             if (UIType == GUIType.Null && !rasterizeGroupForOpacity)
             {
                 RemoveUIHelper();
@@ -764,13 +1024,17 @@ namespace UGF.EditorTools.Psd2UGUI
 
             var uiHelperTp = rasterizeGroupForOpacity
                 ? typeof(PanelHelper)
-                : parser != null ? parser.GetHelperType(UIType) : null;
+                : parser == null ? null : parser.GetHelperType(UIType);
             RemoveIncompatibleUIHelpers(uiHelperTp);
             if (uiHelperTp != null)
             {
-                var helper = (gameObject.GetComponent(uiHelperTp) ?? gameObject.AddComponent(uiHelperTp)) as UIHelperBase;
-                helper.ParseAndAttachUIElements();
-                EditorUtility.SetDirty(helper);
+                var helper = (gameObject.GetComponent(uiHelperTp) ?? Undo.AddComponent(gameObject, uiHelperTp)) as UIHelperBase;
+                if (helper != null)
+                {
+                    helper.ParseAndAttachUIElements();
+                    // Conventional parsing can replace its own Helper when a PSD text source is absent.
+                    if (helper != null) EditorUtility.SetDirty(helper);
+                }
             }
             if (refreshParent)
             {
@@ -795,11 +1059,17 @@ namespace UGF.EditorTools.Psd2UGUI
             var uiHelpers = this.GetComponents<UIHelperBase>();
             if (uiHelpers == null) return;
 
+            bool keptWanted = false;
             foreach (var uiHelper in uiHelpers)
             {
                 if (uiHelper == null) continue;
-                if (keepType != null && uiHelper.GetType() == keepType) continue;
-                DestroyImmediate(uiHelper);
+                if (keepType != null && uiHelper.GetType() == keepType && !keptWanted)
+                {
+                    keptWanted = true;
+                    continue;
+                }
+                // 全部走 Undo：不入栈的话撤销后类型回退了，Helper 组件却已经被销毁或留着重复份。
+                Undo.DestroyObjectImmediate(uiHelper);
             }
         }
         private void RemoveUIHelper()
@@ -809,7 +1079,8 @@ namespace UGF.EditorTools.Psd2UGUI
             {
                 foreach (var uiHelper in uiHelpers)
                 {
-                    DestroyImmediate(uiHelper);
+                    if (aiAuthoritative) Undo.DestroyObjectImmediate(uiHelper);
+                    else DestroyImmediate(uiHelper);
                 }
             }
             EditorUtility.SetDirty(this);
@@ -830,7 +1101,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private static string GetSanitizedExportName(string rawName, bool convertFileNameToLower, string fallbackName)
         {
-            var sanitized = LayerNameUtility.Sanitize(rawName);
+            var sanitized = PsdResourceNaming.FileName(rawName);
             if (string.IsNullOrWhiteSpace(sanitized))
             {
                 sanitized = LayerNameUtility.Sanitize(fallbackName);
@@ -849,60 +1120,10 @@ namespace UGF.EditorTools.Psd2UGUI
         private static string GetLayerExportBaseName(PsdLayerNode node, bool convertFileNameToLower)
         {
             if (node == null) return "PsdLayer";
-            var rawName = string.IsNullOrWhiteSpace(node.name) ? node.UIType.ToString() : node.name;
+            // Fatcat定制: 采用官方新的 ResourceName 命名抽象, 并叠加 R 缩放后缀剥离
+            var rawName = node.ResourceName;
             rawName = Regex.Replace(rawName, @"R(\d+)$", "", RegexOptions.IgnoreCase); // Fatcat定制: 剥离R缩放后缀
             return GetSanitizedExportName(rawName, convertFileNameToLower, node.UIType.ToString());
-        }
-
-        private string ResolveDuplicateExportName(Psd2UIFormConverter converter, string desiredName, bool convertFileNameToLower)
-        {
-            if (converter == null || string.IsNullOrWhiteSpace(desiredName)) return desiredName;
-
-            var allNodes = converter.GetComponentsInChildren<PsdLayerNode>(true);
-            if (allNodes == null || allNodes.Length == 0) return desiredName;
-
-            var exportNodes = allNodes
-                .Where(node => node != null && (node == this || node.NeedExportImage()))
-                .ToArray();
-            if (exportNodes.Length <= 1) return desiredName;
-
-            var desiredNames = exportNodes
-                .Select(node => new { Node = node, Name = GetLayerExportBaseName(node, convertFileNameToLower) })
-                .ToArray();
-
-            var reservedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var entry in desiredNames)
-            {
-                reservedNames.Add(entry.Name);
-            }
-
-            var duplicates = desiredNames
-                .Where(entry => string.Equals(entry.Name, desiredName, StringComparison.OrdinalIgnoreCase))
-                .Select(entry => entry.Node)
-                .OrderBy(node => node.BindPsdLayerIndex)
-                .ThenBy(node => GetObjectId(node))
-                .ToArray();
-
-            if (duplicates.Length <= 1) return desiredName;
-
-            var position = Array.IndexOf(duplicates, this);
-            if (position <= 0) return desiredName;
-
-            int suffixNumber = 1;
-            for (int duplicateIndex = 1; duplicateIndex <= position; duplicateIndex++)
-            {
-                while (reservedNames.Contains($"{desiredName}_{suffixNumber}"))
-                {
-                    suffixNumber++;
-                }
-                if (duplicateIndex == position)
-                {
-                    return $"{desiredName}_{suffixNumber}";
-                }
-                suffixNumber++;
-            }
-
-            return desiredName;
         }
 
         private static string ResolveOverrideExportPath(string baseDir, string overrideFileName, bool convertFileNameToLower, string fallbackName, out string targetDir)
@@ -913,8 +1134,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 return GetSanitizedExportName(fallbackName, convertFileNameToLower, fallbackName);
             }
 
-            var relativePath = Path.ChangeExtension(overrideFileName.Trim().Replace("\\", "/"), null);
-            relativePath = LayerNameUtility.SanitizeRelativePath(relativePath);
+            var relativePath = PsdResourceNaming.ReferenceKey(overrideFileName);
             if (string.IsNullOrWhiteSpace(relativePath))
             {
                 return GetSanitizedExportName(fallbackName, convertFileNameToLower, fallbackName);
@@ -939,18 +1159,20 @@ namespace UGF.EditorTools.Psd2UGUI
         /// </summary>
         /// <param name="forceSpriteType">Force sprite import settings for the exported texture.</param>
         /// <returns></returns>
-        internal string ExportImageAsset(bool forceSpriteType = false, string overrideExportDir = null, string overrideFileName = null, bool convertFileNameToLower = true, bool auto9Slice = false, bool ignoreReference = false)
+        internal string ExportImageAsset(bool forceSpriteType = false, string overrideExportDir = null, string overrideFileName = null, bool convertFileNameToLower = false, bool auto9Slice = false, bool ignoreReference = false)
         {
-            var converter = this.Converter; // Fatcat定制: 用父级Converter替代单例
-            if (converter != null && converter.TryGetSharedSpritePath(this, out var sharedPath))
+            // Fatcat定制: 用父级Converter替代单例(修单例污染), 并叠加官方新增的 ignoreReference 守卫
+            var converter = this.Converter;
+            if (!ignoreReference && converter != null && converter.TryGetSharedSpritePath(this, out var sharedPath))
             {
+                converter.RegisterExportedImagePath(sharedPath);
                 return sharedPath;
             }
             bool useSharedOverride = false;
             string sharedOverrideKey = null;
             string exportDir = overrideExportDir;
             string fileName = overrideFileName;
-            if (converter != null && string.IsNullOrEmpty(exportDir) && !HasReuseReference)
+            if (!ignoreReference && converter != null && string.IsNullOrEmpty(exportDir) && !HasReuseReference)
             {
                 if (converter.TryOverrideSharedOutput(this, out var sharedDir, out var sharedFile))
                 {
@@ -981,6 +1203,11 @@ namespace UGF.EditorTools.Psd2UGUI
                     exportDir = Path.Combine(Psd2UIFormSettings.Instance.UIImagesOutputDir,
                         Psd2UIFormConverter.GetImageSubdirFromPsdName(classifyName)).Replace("\\", "/");
                 }
+                // 官方新增: 路径无效时明确失败(图片写到 Assets 之外会整屏白图却无任何报错)
+                if (string.IsNullOrWhiteSpace(exportDir))
+                {
+                    return null;
+                }
                 if (!Directory.Exists(exportDir))
                 {
                     try
@@ -994,7 +1221,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     }
                 }
                 var defaultImgName = string.IsNullOrWhiteSpace(fileName)
-                    ? ResolveDuplicateExportName(converter, GetLayerExportBaseName(this, convertFileNameToLower), convertFileNameToLower)
+                    ? converter.ResolveImageExportName(this)
                     : GetLayerExportBaseName(this, convertFileNameToLower);
                 var imgName = string.IsNullOrWhiteSpace(fileName)
                     ? defaultImgName
@@ -1012,7 +1239,7 @@ namespace UGF.EditorTools.Psd2UGUI
                     }
                 }
                 string assetExtension = ".png";
-                var imgFileName = Path.Combine(exportDir, imgName + assetExtension).Replace("\\", "/");
+                var imgFileName = Path.Combine(exportDir, imgName.EndsWith(assetExtension, StringComparison.OrdinalIgnoreCase) ? imgName : imgName + assetExtension).Replace("\\", "/");
                 // Fatcat定制: 解析图层名 RXX 后缀, 按比例缩放导出纹理
                 float resizeRatio = 1.0f;
                 string ratioSourceName = !string.IsNullOrWhiteSpace(SourceLayerName) ? SourceLayerName : this.name;
@@ -1050,28 +1277,19 @@ namespace UGF.EditorTools.Psd2UGUI
                 {
                     return null;
                 }
-                File.WriteAllBytes(imgFileName, bytes);
-#if EFUN_PRIVATE
-                if (Psd2UIFormSettings.Instance.CompressImage)
+                if (ignoreReference || useSharedOverride)
                 {
-                    bool compressResult = Psd2UIFormConverter.CompressImageFile(imgFileName);
-                    if (compressResult)
-                    {
-                        Debug.Log($"Compress image success:{imgFileName}");
-                    }
-                    else
-                    {
-                        Debug.LogWarning($"Compress image failed:{imgFileName}");
-                    }
+                    File.WriteAllBytes(imgFileName, bytes);
+                    if (Psd2UIFormSettings.Instance.CompressImage) Psd2UIFormConverter.CompressImageFile(imgFileName);
+                    // 官方新增: 强制同步导入(白图问题的源头修复)
+                    AssetDatabase.ImportAsset(imgFileName, ImportAssetOptions.ForceSynchronousImport);
+                    // Fatcat定制: 用融合 R 缩放降位的 isHighBitDepth(缩放经RGBA32回读后按8bit导入)
+                    Psd2UIFormConverter.ConvertTexturesType(new[] { imgFileName }, isImage || forceSpriteType, isHighBitDepth);
+                    if (auto9Slice) Psd2UIFormConverter.ApplySpriteNineSlice(imgFileName);
+                    converter?.RegisterExportedImagePath(imgFileName);
+                    assetName = imgFileName;
                 }
-#endif
-                assetName = imgFileName;
-                AssetDatabase.Refresh();
-                Psd2UIFormConverter.ConvertTexturesType(new string[] { imgFileName }, isImage || forceSpriteType, isHighBitDepth); // Fatcat定制: 缩放导出时按8bit导入
-                if (auto9Slice)
-                {
-                    Psd2UIFormConverter.ApplySpriteNineSlice(imgFileName);
-                }
+                else assetName = converter.WriteImage(this, imgFileName, bytes, isImage || forceSpriteType, rendered.IsHighBitDepth, auto9Slice);
                 if (useSharedOverride && converter != null)
                 {
                     converter.RegisterSharedSprite(string.IsNullOrEmpty(sharedOverrideKey) ? LayerNameLookupKey : sharedOverrideKey, imgFileName);
@@ -1135,6 +1353,9 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private string ResolvePreviewCacheKey()
         {
+            if (IsAiTarget && HasAiSources)
+                return "AiPreview|" + generatedNodeId + "|" + UIType + "|" + string.Join(",", aiSourceIndices)
+                    + "|" + Psd2UIFormConverter.Instance?.psdAssetChangeTime;
             if (ShouldRenderPreviewFromCurrentChildTree())
             {
                 var childKeys = new List<string>();
@@ -1313,8 +1534,8 @@ namespace UGF.EditorTools.Psd2UGUI
                 return null;
             }
 
-            TextureFormat textureFormat = rendered.IsHighBitDepth ? TextureFormat.RGBA64 : TextureFormat.RGBA32;
-            var texture = new Texture2D(rendered.Width, rendered.Height, textureFormat, false);
+            GraphicsFormat textureFormat = rendered.IsHighBitDepth ? GraphicsFormat.R16G16B16A16_UNorm : GraphicsFormat.R8G8B8A8_SRGB;
+            var texture = new Texture2D(rendered.Width, rendered.Height, textureFormat, TextureCreationFlags.None);
             texture.hideFlags = transient ? HideFlags.HideAndDontSave : HideFlags.None;
             texture.alphaIsTransparency = true;
             if (rendered.IsHighBitDepth)
@@ -1348,15 +1569,14 @@ namespace UGF.EditorTools.Psd2UGUI
             return AssetDatabase.LoadAllAssetsAtPath(assetPath).OfType<Sprite>().FirstOrDefault();
         }
 
-        internal static string ResolveExportedImageAssetPath(string baseDir, string relativeKey, bool preferHighBitDepth = false)
+        internal static string ResolveExportedImageAssetPath(string baseDir, string relativeKey)
         {
             if (string.IsNullOrWhiteSpace(baseDir) || string.IsNullOrWhiteSpace(relativeKey))
             {
                 return null;
             }
 
-            string preferredLowPath = Path.Combine(baseDir, $"{relativeKey}.png").Replace("\\", "/");
-            return PsdTextureAssetUtility.MatchesExportMode(preferredLowPath, preferHighBitDepth) ? preferredLowPath : null;
+            return PsdResourceNaming.FindAsset(baseDir, relativeKey, false);
         }
 
         internal static bool TryReplaceSpriteSubAsset(string assetPath, Texture2D texture, Vector4 border, out Sprite sprite)
@@ -1376,11 +1596,16 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
             }
 
+            // PPU 跟随导入器，别固定 100；轴心仍保持中心约定（导入器的 spritePivot 默认值与"左下"无法区分）。
+            var spriteImporter = UnityEditor.AssetImporter.GetAtPath(assetPath) as UnityEditor.TextureImporter;
+            float fallbackPixelsPerUnit = spriteImporter != null && spriteImporter.spritePixelsPerUnit > 0f
+                ? spriteImporter.spritePixelsPerUnit
+                : 100f;
             sprite = Sprite.Create(
                 texture,
                 new Rect(0f, 0f, texture.width, texture.height),
                 new Vector2(0.5f, 0.5f),
-                100f,
+                fallbackPixelsPerUnit,
                 0u,
                 SpriteMeshType.FullRect,
                 border);
@@ -1389,8 +1614,9 @@ namespace UGF.EditorTools.Psd2UGUI
             EditorUtility.SetDirty(texture);
             EditorUtility.SetDirty(sprite);
             AssetDatabase.SaveAssets();
-            AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate);
-            sprite = LoadSpriteAssetAtPath(assetPath);
+            // ForceUpdate 重导入会销毁刚挂进来的 Sprite 子资产，导致兜底路径九宫边框被归零。
+            var reloadedSprite = LoadSpriteAssetAtPath(assetPath);
+            if (reloadedSprite != null) sprite = reloadedSprite;
             return sprite != null;
         }
 
@@ -1453,6 +1679,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private PsdRenderedImage RenderNodeImage(bool previewRender)
         {
+            if (aiRenderTree != null) return PsdLayerRenderer.RenderTree(aiRenderTree, includeHiddenLayers: true, applyClippingMasks: true, isPreviewRender: previewRender);
             if (ShouldRenderPreviewFromCurrentChildTree())
             {
                 return RenderGeneratedCompositeImage(previewRender);
@@ -1473,20 +1700,8 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private bool ShouldRenderPreviewFromCurrentChildTree()
         {
-            if (LayerType != PsdLayerType.LayerGroup || transform == null)
-            {
-                return false;
-            }
-
-            for (int i = 0, childCount = transform.childCount; i < childCount; i++)
-            {
-                if (transform.GetChild(i).GetComponent<PsdLayerNode>() != null)
-                {
-                    return true;
-                }
-            }
-
-            return false;
+            // The Unity hierarchy is authoritative, including groups emptied by regrouping.
+            return LayerType == PsdLayerType.LayerGroup;
         }
 
         private PsdRenderedImage RenderGeneratedCompositeImage(bool previewRender)
@@ -1580,7 +1795,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 return null;
             }
 
-            bool hasDirectChildNode = false;
+            if (node.aiRenderTree != null) return node.aiRenderTree;
             var children = new List<PsdLayerRenderNode>(node.transform.childCount);
             for (int i = 0, childCount = node.transform.childCount; i < childCount; i++)
             {
@@ -1590,7 +1805,6 @@ namespace UGF.EditorTools.Psd2UGUI
                     continue;
                 }
 
-                hasDirectChildNode = true;
                 var childTree = BuildCurrentRenderTree(childNode, false);
                 if (childTree != null)
                 {
@@ -1599,12 +1813,12 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             var sourceLayer = node.BindPsdLayer;
-            if (sourceLayer != null && (!sourceLayer.IsGroup || !hasDirectChildNode))
+            if (sourceLayer != null && !sourceLayer.IsGroup)
             {
                 return new PsdLayerRenderNode(sourceLayer);
             }
 
-            if (sourceLayer == null && children.Count == 0)
+            if (children.Count == 0)
             {
                 return null;
             }
@@ -1722,7 +1936,7 @@ namespace UGF.EditorTools.Psd2UGUI
                 return null;
             }
 
-            for (int i = 0; i < uiTps.Length; i++)
+            for (int i = 0, count = aiAuthoritative && AiUiContract.IsRole(uiTps[0]) ? 1 : uiTps.Length; i < count; i++)
             {
                 var nodes = FindOwnedSubLayerNodes(uiTps[i]);
                 if (nodes != null && nodes.Length > 0)
@@ -1740,12 +1954,61 @@ namespace UGF.EditorTools.Psd2UGUI
             }
 
             var matches = new List<PsdLayerNode>(4);
-            var matchedIds = new HashSet<int>();
-            for (int i = 0; i < uiTps.Length; i++)
+            var matchedIds = new HashSet<PsdObjectId>();
+            // AI 权威节点：首参是角色时只认角色，不能回退去认领通用 Image/Text（测试
+            // ExplicitRoleLookupNeverClaimsGenericImage 钉住该契约）；需要回退由调用方自己分步查。
+            for (int i = 0, count = aiAuthoritative && AiUiContract.IsRole(uiTps[0]) ? 1 : uiTps.Length; i < count; i++)
             {
                 CollectOwnedSubLayerNodesRecursive(transform, uiTps[i], matches, matchedIds);
             }
             return matches.Count > 0 ? matches.ToArray() : null;
+        }
+
+        internal PsdLayerNode FindOwnedContainerBackground()
+        {
+            var background = FindOwnedSubLayerNode(GUIType.Background);
+            if (aiAuthoritative) return background;
+            if (background != null) return background;
+            var images = GetComponentsInChildren<PsdLayerNode>(true);
+            var ownerRect = LayerRect;
+            foreach (var image in images)
+            {
+                if (image == this || (image.UIType != GUIType.Image && image.UIType != GUIType.RawImage)
+                    || !image.gameObject.activeInHierarchy
+                    || !IsContainerBackgroundCandidate(image.name, ownerRect, image.LayerRect)) continue;
+                var parent = image.transform.parent;
+                while (parent != null && parent != transform)
+                {
+                    var parentNode = parent.GetComponent<PsdLayerNode>();
+                    if (parentNode != null && parentNode.UIType != GUIType.Null) break;
+                    parent = parent.parent;
+                }
+                if (parent != transform) continue; // Do not cross another UI instance, including a Panel.
+                if (background != null) return null; // Multiple candidates require an explicit role.
+                background = image;
+            }
+            return background;
+        }
+
+        internal static bool IsContainerBackgroundCandidate(string name, Rect owner, Rect image)
+        {
+            if (owner.width <= 0 || owner.height <= 0 || image.width <= 0 || image.height <= 0) return false;
+            bool namedBackground = false;
+            foreach (string token in name.Split(new[] { '_', '-', ' ', '.', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (string.Equals(token, "bg", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(token, "background", StringComparison.OrdinalIgnoreCase)
+                    || token == "背景" || token == "底图")
+                {
+                    namedBackground = true;
+                    break;
+                }
+            }
+            // LayerRect stores a center, not Rect.xMin/yMin. Require coverage on both axes.
+            return namedBackground && image.width >= owner.width * .8f && image.height >= owner.height * .8f
+                && image.width <= owner.width * 1.25f && image.height <= owner.height * 1.25f
+                && Mathf.Abs(image.x - owner.x) + owner.width * .4f <= image.width * .5f
+                && Mathf.Abs(image.y - owner.y) + owner.height * .4f <= image.height * .5f;
         }
         internal PsdLayerNode FindNearestCompatibleOwner()
         {
@@ -1810,7 +2073,7 @@ namespace UGF.EditorTools.Psd2UGUI
             targetObj = null;
             if (!HasReuseReference) return false;
             var sharedOutput = UGUIParser.Instance?.SharedAssetsOutput;
-            string targetPath = ResolveExportedImageAssetPath(sharedOutput, ReuseTargetKey, PreferHighBitDepthAsset);
+            string targetPath = Psd2UIFormConverter.Instance.ResolveResource(sharedOutput, ReuseTargetKey, false);
             if (string.IsNullOrWhiteSpace(targetPath)) return false;
             targetObj = (UnityEngine.Object)LoadSpriteAssetAtPath(targetPath) ?? AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(targetPath);
             return targetObj != null;
@@ -1822,34 +2085,8 @@ namespace UGF.EditorTools.Psd2UGUI
             var sharedDir = UGUIParser.Instance?.SharedPrefabOutput;
             if (string.IsNullOrWhiteSpace(sharedDir)) return false;
 
-            sharedDir = sharedDir.Replace("\\", "/");
-            var targetPath = Path.Combine(sharedDir, $"{ReusePrefabKey}.prefab").Replace("\\", "/");
-            targetPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(targetPath);
-            if (targetPrefab != null) return true;
-
-            var searchKey = LayerNameUtility.GetRelativePathLeafName(ReusePrefabKey);
-            if (string.IsNullOrWhiteSpace(searchKey)) return false;
-
-            var guids = AssetDatabase.FindAssets($"{searchKey} t:prefab", new string[] { sharedDir });
-            if (guids == null || guids.Length == 0) return false;
-
-            foreach (var guid in guids)
-            {
-                var path = AssetDatabase.GUIDToAssetPath(guid);
-                if (string.IsNullOrWhiteSpace(path)) continue;
-                var fileName = Path.GetFileNameWithoutExtension(path);
-                if (!string.Equals(fileName, searchKey, StringComparison.OrdinalIgnoreCase)) continue;
-
-                targetPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
-                if (targetPrefab != null) return true;
-            }
-
-            // fallback: try first match
-            var firstPath = AssetDatabase.GUIDToAssetPath(guids[0]);
-            if (!string.IsNullOrWhiteSpace(firstPath))
-            {
-                targetPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(firstPath);
-            }
+            var targetPath = Psd2UIFormConverter.Instance.ResolveResource(sharedDir, ReusePrefabKey, true);
+            if (targetPath != null) targetPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(targetPath);
             return targetPrefab != null;
         }
         internal bool TryGetReuseTarget(out PsdLayerNode target)
@@ -1880,7 +2117,7 @@ namespace UGF.EditorTools.Psd2UGUI
             return null;
         }
 
-        private void CollectOwnedSubLayerNodesRecursive(Transform parent, GUIType target, List<PsdLayerNode> matches, HashSet<int> matchedIds)
+        private void CollectOwnedSubLayerNodesRecursive(Transform parent, GUIType target, List<PsdLayerNode> matches, HashSet<PsdObjectId> matchedIds)
         {
             if (parent == null || matches == null || matchedIds == null)
             {
@@ -1896,9 +2133,13 @@ namespace UGF.EditorTools.Psd2UGUI
                     continue;
                 }
 
-                if (childNode.UIType == target && childNode.IsOwnedBy(this))
+                if (childNode.UIType == target && childNode.IsAiReady && childNode.IsOwnedBy(this))
                 {
+#if UNITY_6000_3_OR_NEWER
+                    var instanceId = childNode.GetEntityId();
+#else
                     int instanceId = childNode.GetInstanceID();
+#endif
                     if (matchedIds.Add(instanceId))
                     {
                         matches.Add(childNode);
@@ -1940,30 +2181,14 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private PsdLayerNode FindNearestCompatibleMainOwner()
         {
-            var current = transform.parent;
-            while (current != null)
+            for (var current = transform.parent; current != null; current = current.parent)
             {
-                var ownerNode = current.GetComponent<PsdLayerNode>();
-                if (ownerNode == null)
-                {
-                    current = current.parent;
-                    continue;
-                }
-
-                if (UGUIParser.CanOwnMainChild(ownerNode.UIType, UIType))
-                {
-                    return ownerNode;
-                }
-
-                if (UGUIParser.IsTransparentContainerType(ownerNode.UIType))
-                {
-                    current = current.parent;
-                    continue;
-                }
-
-                current = current.parent;
+                var owner = current.GetComponent<PsdLayerNode>();
+                if (owner == null || owner.UIType == GUIType.Null) continue;
+                // A nested control belongs to its nearest structural owner. Do not cross a
+                // ScrollView/Item/Panel to let an outer Dropdown or ToggleGroup consume it.
+                return owner;
             }
-
             return null;
         }
 
@@ -2051,6 +2276,11 @@ namespace UGF.EditorTools.Psd2UGUI
         internal bool TryGetTextLayoutRect(out Rect rect)
         {
             rect = default;
+            if (IsAiTarget && (aiExplicitRect || aiText?.mode == "value"))
+            {
+                rect = LayerRect;
+                return rect.width > 0 && rect.height > 0;
+            }
             var sourceLayer = mTextSourcePsdLayer ?? BindPsdLayer;
             if (sourceLayer == null
                 || !sourceLayer.TryGetTextLayerInfo(out var textInfo))
@@ -2098,6 +2328,11 @@ namespace UGF.EditorTools.Psd2UGUI
         internal bool TryGetTextUnityRotation(out Vector3 rotation)
         {
             rotation = Vector3.zero;
+            if (IsAiTarget && aiText?.mode == "value")
+            {
+                rotation.z = aiText.rotation;
+                return true;
+            }
             var sourceLayer = mTextSourcePsdLayer ?? BindPsdLayer;
             return sourceLayer != null
                 && sourceLayer.IsTextLayer()
@@ -2106,22 +2341,26 @@ namespace UGF.EditorTools.Psd2UGUI
 
         internal void InitPsdLayers(PsdDocument psdInstance)
         {
+            if (psdInstance != null) RealignSourceLayerIndexes(psdInstance);
+            if (IsAiTarget) UpdateAiBinding(psdInstance);
             mTextSourcePsdLayer = null;
             if (psdInstance == null)
             {
                 BindPsdLayer = null;
                 return;
             }
-            if (BindPsdLayerIndex >= 0)
-            {
-                BindPsdLayer = psdInstance.GetLayerByFlatIndex(BindPsdLayerIndex);
-            }
+            BindPsdLayer = BindPsdLayerIndex >= 0 ? psdInstance.GetLayerByFlatIndex(BindPsdLayerIndex) : null;
             if (textSourceBindPsdLayerIndex >= 0)
             {
                 mTextSourcePsdLayer = psdInstance.GetLayerByFlatIndex(textSourceBindPsdLayerIndex);
             }
         }
         internal bool ParseTextLayerInfo(out TextLayerInfo textInfo)
+        {
+            return IsAiTarget ? TryParseAiText(out textInfo) : ParseNativeTextLayerInfo(out textInfo);
+        }
+
+        private bool ParseNativeTextLayerInfo(out TextLayerInfo textInfo)
         {
             textInfo = default;
             if (!IsTextLayer(out var txtLayer)
@@ -2192,7 +2431,7 @@ namespace UGF.EditorTools.Psd2UGUI
             return true;
         }
 
-        private static TextStyleRunInfo ConvertTextStyleRun(PsdTextStyleRun sourceRun)
+        internal static TextStyleRunInfo ConvertTextStyleRun(PsdTextStyleRun sourceRun)
         {
             var source = sourceRun.Style;
             float verticalScale = Mathf.Max(0.0001f, source.VerticalScale);

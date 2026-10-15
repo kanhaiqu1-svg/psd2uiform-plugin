@@ -2,6 +2,7 @@
     "defaultTextType": 3,
     "defaultImageType": 1,
     "forceUseTMP": false,
+    "tmpGradientConversionMode": 0,
     "uiFormTemplateGuid": "6d8c85c377edc7240ace111136f916b1",
     "rules": [
         {
@@ -474,6 +475,7 @@
     "sharedAssetsOutput": "Assets\\Examples\\Common",
     "sharedPrefabOutput": "Assets\\Examples\\CommonPrefab",
     "aiProviderConfig": {
-        "provider": 2
+        "mode": 1,
+        "showCliWindow": false
     }
 }

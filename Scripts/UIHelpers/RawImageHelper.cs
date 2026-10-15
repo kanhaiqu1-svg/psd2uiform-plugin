@@ -43,7 +43,13 @@ namespace UGF.EditorTools.Psd2UGUI
         protected override void InitUIElements(GameObject uiRoot)
         {
             var imgCom = uiRoot.GetComponentInChildren<UnityEngine.UI.RawImage>();
+            if (imgCom == null)
+            {
+                Debug.LogWarning($"RawImage 模板缺少 RawImage 组件，已跳过贴图绑定: {uiRoot.name}");
+                return;
+            }
             UGUIParser.SetRectTransform(rawImage, imgCom);
+            if (rawImage.IsAiAuthoritative) PsdGeneratedDrawOrder.Register(rawImage, imgCom);
             imgCom.texture = UGUIParser.LayerNode2Texture(rawImage);
         }
     }

@@ -18,7 +18,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
-using UnityEngine;
+using cn.efunstudio.psdreader.FullSerializer;
 
 namespace UGF.EditorTools.Psd2UGUI
 {
@@ -33,7 +33,6 @@ namespace UGF.EditorTools.Psd2UGUI
     {
         private static readonly UTF8Encoding Utf8NoBom = new UTF8Encoding(false);
         private static readonly Regex JsonStringFieldRegex = new Regex("\"(?<key>[^\"]+)\"\\s*:\\s*\"(?<value>(?:\\\\.|[^\"])*)\"", RegexOptions.Compiled | RegexOptions.Singleline);
-        private static readonly Regex ForbiddenPatchAliasFieldRegex = new Regex("\"(?<key>target|nodeId|siblingIndex|judgement|mainType|roleType|currentMainType|currentRoleType|predictedMainType|predictedRoleType)\"\\s*:", RegexOptions.Compiled | RegexOptions.Singleline);
         private static readonly Regex StructuredLogRegex = new Regex("^(?<time>\\d{4}-\\d{2}-\\d{2}T\\S+)\\s+(?<level>[A-Z]+)\\s+(?<body>.+)$", RegexOptions.Compiled);
         private static readonly Regex NestedItemTypeRegex = new Regex("\"item\"\\s*:\\s*\\{.*?\"type\"\\s*:\\s*\"(?<value>(?:\\\\.|[^\"])*)\"", RegexOptions.Compiled | RegexOptions.Singleline);
         private static readonly Regex NestedItemStatusRegex = new Regex("\"item\"\\s*:\\s*\\{.*?\"status\"\\s*:\\s*\"(?<value>(?:\\\\.|[^\"])*)\"", RegexOptions.Compiled | RegexOptions.Singleline);
@@ -110,7 +109,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
             string sourcePath = ResolveReadableOutputJsonPath(request);
             if ((string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
-                && !TryRecoverExplicitOutputJsonFile(request, out sourcePath, out _))
+                && (request.DisableOutputRecovery || !TryRecoverExplicitOutputJsonFile(request, out sourcePath, out _)))
             {
                 error = "Result JSON file not found.";
                 return false;
@@ -175,12 +174,8 @@ namespace UGF.EditorTools.Psd2UGUI
             }
         }
 
-        internal static bool TryCommitValidatedJsonDocument(AiAnalysisRequest request, out string error)
-        {
-            return TryCommitValidatedJsonDocument(request, allowRecoveredExplicitArtifact: true, out error);
-        }
-
-        internal static bool TryCommitValidatedJsonDocument(AiAnalysisRequest request, bool allowRecoveredExplicitArtifact, out string error)
+        internal static bool TryCommitValidatedJsonDocument(AiAnalysisRequest request, out string error,
+            bool allowIncompleteDocument = true, bool allowRecoveredExplicitArtifact = false)
         {
             error = null;
             if (request == null)
@@ -223,16 +218,15 @@ namespace UGF.EditorTools.Psd2UGUI
                 return false;
             }
 
-            if (!TryValidateJsonText(request.ResultDocumentKind, jsonText, out error))
-            {
-                return false;
-            }
-
+            if (!allowIncompleteDocument && !IsCompleteJsonObject(jsonText))
+            { error = "等待完整交付；只在 Provider 结束后恢复截断前缀。"; return false; }
+            if (!AiRecognitionResultLoader.TryParse(jsonText, out var recognition, out error)) return false;
+            jsonText = AiRecognitionResultLoader.Serialize(recognition);
             try
             {
+                AiJobFileUtility.WriteText(request.OutputJsonPath, jsonText);
                 if (!PathsEqual(sourcePath, request.OutputJsonPath))
                 {
-                    AiJobFileUtility.WriteText(request.OutputJsonPath, jsonText);
                     AiJobFileUtility.DeleteFileIfExists(sourcePath);
                 }
 
@@ -336,43 +330,8 @@ namespace UGF.EditorTools.Psd2UGUI
 
         internal static bool CouldContainFinalJsonDocument(AiResultDocumentKind kind, string text)
         {
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                return false;
-            }
-
-            string trimmed = text.Trim();
-            int jsonStart = trimmed.IndexOf('{');
-            int jsonEnd = trimmed.LastIndexOf('}');
-            if (jsonStart < 0 || jsonEnd <= jsonStart)
-            {
-                return false;
-            }
-
-            string candidate = trimmed.Substring(jsonStart, jsonEnd - jsonStart + 1);
-            if (!candidate.Contains("\"treeHash\"", StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            switch (kind)
-            {
-                case AiResultDocumentKind.MainType:
-                    return candidate.Contains("\"nodes\"", StringComparison.Ordinal);
-                case AiResultDocumentKind.ChildRelation:
-                    return candidate.Contains("\"relations\"", StringComparison.Ordinal);
-                case AiResultDocumentKind.RecognitionCombined:
-                    return candidate.Contains("\"owners\"", StringComparison.Ordinal)
-                        && candidate.Contains("\"roles\"", StringComparison.Ordinal)
-                        && candidate.Contains("\"nodeLabels\"", StringComparison.Ordinal);
-                case AiResultDocumentKind.Structural:
-                    return candidate.Contains("\"operations\"", StringComparison.Ordinal);
-                case AiResultDocumentKind.Patch:
-                    return candidate.Contains("\"analysis\"", StringComparison.Ordinal)
-                        || candidate.Contains("\"operations\"", StringComparison.Ordinal);
-                default:
-                    return false;
-            }
+            return kind == AiResultDocumentKind.Recognition && !string.IsNullOrWhiteSpace(text)
+                && text.Contains("\"version\"") && text.Contains("\"ui\"");
         }
 
         private static string ResolveReadableOutputJsonPath(AiAnalysisRequest request)
@@ -390,6 +349,16 @@ namespace UGF.EditorTools.Psd2UGUI
             return request.OutputJsonPath ?? string.Empty;
         }
 
+        internal static string GetCliRelativePath(AiAnalysisRequest request, string path)
+        {
+            string root = Path.GetFullPath(request.WorkingDirectory);
+            string fullPath = Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(root, path));
+            string relative = PathExtensions.GetRelativePath(root, fullPath).Replace('\\', '/');
+            if (Path.IsPathRooted(relative) || relative == ".." || relative.StartsWith("../", StringComparison.Ordinal))
+                throw new InvalidOperationException("CLI file is outside the recognition directory: " + path);
+            return relative;
+        }
+
         private static string BuildExplicitOutputFileContract(AiAnalysisRequest request)
         {
             if (request == null)
@@ -405,16 +374,17 @@ namespace UGF.EditorTools.Psd2UGUI
                 return string.Empty;
             }
 
-            var builder = new StringBuilder(512);
-            builder.AppendLine("## CLI Output Contract");
+            string displayPath = GetCliRelativePath(request, outputPath);
+
+            var builder = new StringBuilder(256);
+            builder.AppendLine("## CLI 输出约定");
             builder.AppendLine();
-            builder.AppendLine("- 你必须把最终 " + GetVisibleBootstrapResultLabel(request.ResultDocumentKind) + " 写入下面这个 UTF-8 文件路径：");
-            builder.AppendLine("  " + outputPath);
-            builder.AppendLine("- 这个文件是 Unity 认定任务成功的唯一产物。");
-            builder.AppendLine("- 不要写入 `recognition_output.json` 或任何其它自定义结果文件。");
-            builder.AppendLine("- 最终 assistant 回复必须与该文件内容完全一致，且只能是一个 JSON 对象。");
-            builder.AppendLine("- 不要输出总结、进度汇报、Markdown、代码块或额外说明。");
-            builder.AppendLine("- 如果需要自检或中间处理，只能放在 thinking/tool 事件里，不能放在最终 assistant 回复里。");
+            builder.AppendLine("将最终" + GetVisibleBootstrapResultLabel(request.ResultDocumentKind) + "写入此 UTF-8 暂存文件（一个完整 JSON 对象）：");
+            builder.AppendLine("  " + displayPath);
+            builder.AppendLine("- Unity 仅以此文件为结果；禁止写其他结果文件。");
+            builder.AppendLine("- 完成后仅简短回复，不重复 JSON；禁止在对话或代码块输出结果。");
+            builder.AppendLine("- 中间检查仅使用思考或工具事件，不输出过程说明。");
+            builder.AppendLine("- 每个区域判断完成后保留结论；最终统一检查一次并立即写文件。局部疑问写入 issues，不要反复重算已确定的结果。");
             return builder.ToString().TrimEnd();
         }
 
@@ -602,7 +572,7 @@ namespace UGF.EditorTools.Psd2UGUI
 
         private static StringComparison GetPathComparison()
         {
-            return Application.platform == RuntimePlatform.WindowsEditor
+            return Path.DirectorySeparatorChar == '\\'
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
         }
@@ -610,63 +580,12 @@ namespace UGF.EditorTools.Psd2UGUI
         internal static bool TryValidateJsonText(AiResultDocumentKind kind, string jsonText, out string error)
         {
             error = null;
-            if (string.IsNullOrWhiteSpace(jsonText))
-            {
-                error = "JSON output is empty.";
-                return false;
-            }
-
-            switch (kind)
-            {
-                case AiResultDocumentKind.MainType:
-                    return TryValidateMainTypeJson(jsonText, out error);
-                case AiResultDocumentKind.ChildRelation:
-                    return TryValidateChildRelationJson(jsonText, out error);
-                case AiResultDocumentKind.RecognitionCombined:
-                    return TryValidateRecognitionCombinedJson(jsonText, out error);
-                case AiResultDocumentKind.Structural:
-                    return TryValidateStructuralJson(jsonText, out error);
-                case AiResultDocumentKind.Patch:
-                    return TryValidatePatchJsonText(jsonText, out error);
-                default:
-                    error = "Unsupported AI result document kind.";
-                    return false;
-            }
+            if (kind != AiResultDocumentKind.Recognition || string.IsNullOrWhiteSpace(jsonText))
+            { error = "Expected a recognition JSON document."; return false; }
+            return AiRecognitionResultLoader.TryParse(jsonText, out _, out error);
         }
 
-        internal static bool TryValidatePatchJsonText(string jsonText, out string error)
-        {
-            error = null;
-            if (string.IsNullOrWhiteSpace(jsonText))
-            {
-                error = "Patch JSON is empty.";
-                return false;
-            }
 
-            var match = ForbiddenPatchAliasFieldRegex.Match(jsonText);
-            if (match.Success)
-            {
-                error = $"Patch JSON contains forbidden alias field '{match.Groups["key"].Value}'.";
-                return false;
-            }
-
-            try
-            {
-                var patch = JsonUtility.FromJson<AiPatchDocument>(jsonText);
-                if (patch == null || string.IsNullOrWhiteSpace(patch.treeHash))
-                {
-                    error = "Patch JSON is missing treeHash.";
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                error = $"Patch JSON parse failed: {ex.Message}";
-                return false;
-            }
-
-            return true;
-        }
 
         internal static bool TryParseCodexTerminalEvent(string rawLine, out AiStreamTerminalEventKind kind, out string message)
         {
@@ -705,7 +624,6 @@ namespace UGF.EditorTools.Psd2UGUI
                 case "turn.failed":
                 case "response.failed":
                 case "session.failed":
-                case "error":
                     kind = AiStreamTerminalEventKind.Failed;
                     message =
                         TryExtractJsonStringField(line, "message")
@@ -812,169 +730,34 @@ namespace UGF.EditorTools.Psd2UGUI
             return NormalizeProgressDetail(line);
         }
 
-        internal static string GetVisibleBootstrapResultLabel(AiResultDocumentKind kind)
+        internal static string GetVisibleBootstrapResultLabel(AiResultDocumentKind kind) => "UI 目标树 JSON";
+
+
+
+        private static bool IsCompleteJsonObject(string json)
         {
-            switch (kind)
+            bool quoted = false, escaped = false, started = false, ended = false;
+            int depth = 0;
+            foreach (char c in json)
             {
-                case AiResultDocumentKind.MainType:
-                    return "主控件识别结果 JSON";
-                case AiResultDocumentKind.ChildRelation:
-                    return "子控件关系识别结果 JSON";
-                case AiResultDocumentKind.RecognitionCombined:
-                    return "UI元素识别结果 JSON";
-                case AiResultDocumentKind.Structural:
-                    return "结构修复计划 JSON";
-                case AiResultDocumentKind.Patch:
-                    return "最终 patch JSON";
-                default:
-                    return "最终 JSON 结果";
+                if (quoted)
+                {
+                    if (escaped) escaped = false;
+                    else if (c == '\\') escaped = true;
+                    else if (c == '"') quoted = false;
+                    continue;
+                }
+                if (char.IsWhiteSpace(c)) continue;
+                if (ended) return false;
+                if (!started) { if (c != '{') return false; started = true; }
+                if (c == '"') quoted = true;
+                else if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') { if (--depth < 0) return false; if (depth == 0) ended = true; }
             }
+            return ended && !quoted && depth == 0;
         }
 
-        private static bool TryValidateMainTypeJson(string jsonText, out string error)
-        {
-            error = null;
-            try
-            {
-                var document = JsonUtility.FromJson<AiMainTypeResultDocument>(jsonText);
-                if (document == null)
-                {
-                    error = "MainType JSON is invalid.";
-                    return false;
-                }
-                if (string.IsNullOrWhiteSpace(document.treeHash))
-                {
-                    error = "MainType JSON is missing treeHash.";
-                    return false;
-                }
-                if (document.nodes == null)
-                {
-                    error = "MainType JSON is missing nodes.";
-                    return false;
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                error = $"MainType JSON parse failed: {ex.Message}";
-                return false;
-            }
-        }
 
-        private static bool TryValidateRecognitionCombinedJson(string jsonText, out string error)
-        {
-            error = null;
-            try
-            {
-                var document = JsonUtility.FromJson<AiRecognitionCombinedResultDocument>(jsonText);
-                if (document == null)
-                {
-                    error = "RecognitionCombined JSON is invalid.";
-                    return false;
-                }
-                if (string.IsNullOrWhiteSpace(document.treeHash))
-                {
-                    error = "RecognitionCombined JSON is missing treeHash.";
-                    return false;
-                }
-                bool hasSemanticGraph =
-                    document.owners != null
-                    && document.roles != null
-                    && document.nodeLabels != null;
-                if (!hasSemanticGraph)
-                {
-                    error = "RecognitionCombined JSON must contain owners, roles, and nodeLabels.";
-                    return false;
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                error = $"RecognitionCombined JSON parse failed: {ex.Message}";
-                return false;
-            }
-        }
-
-        private static bool TryValidateChildRelationJson(string jsonText, out string error)
-        {
-            error = null;
-            try
-            {
-                var document = JsonUtility.FromJson<AiChildRelationResultDocument>(jsonText);
-                if (document == null)
-                {
-                    error = "ChildRelation JSON is invalid.";
-                    return false;
-                }
-                if (string.IsNullOrWhiteSpace(document.treeHash))
-                {
-                    error = "ChildRelation JSON is missing treeHash.";
-                    return false;
-                }
-                if (document.relations == null)
-                {
-                    error = "ChildRelation JSON is missing relations.";
-                    return false;
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                error = $"ChildRelation JSON parse failed: {ex.Message}";
-                return false;
-            }
-        }
-
-        private static bool TryValidateStructuralJson(string jsonText, out string error)
-        {
-            error = null;
-            try
-            {
-                var document = JsonUtility.FromJson<AiStructuralResultDocument>(jsonText);
-                if (document == null)
-                {
-                    error = "Structural JSON is invalid.";
-                    return false;
-                }
-                if (string.IsNullOrWhiteSpace(document.treeHash))
-                {
-                    error = "Structural JSON is missing treeHash.";
-                    return false;
-                }
-                if (document.operations == null)
-                {
-                    error = "Structural JSON is missing operations.";
-                    return false;
-                }
-
-                for (int i = 0; i < document.operations.Count; i++)
-                {
-                    var operation = document.operations[i];
-                    if (operation == null)
-                    {
-                        error = $"Structural operation[{i}] is null.";
-                        return false;
-                    }
-
-                    if (!AiPatchOperationNames.TryParse(operation.op, out var kind)
-                        || (kind != AiPatchOperationKind.CreateGroup
-                            && kind != AiPatchOperationKind.MoveNode
-                            && kind != AiPatchOperationKind.SetUIType))
-                    {
-                        error = $"Structural operation[{i}] has unsupported op '{operation.op}'.";
-                        return false;
-                    }
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                error = $"Structural JSON parse failed: {ex.Message}";
-                return false;
-            }
-        }
 
         private static string ExtractJsonCandidate(string rawOutput, AiResultDocumentKind kind)
         {
@@ -1232,6 +1015,15 @@ namespace UGF.EditorTools.Psd2UGUI
 
             if (TryResolveFailureText(candidate, out message))
             {
+                return true;
+            }
+
+            // OpenCode may exit with code 0 after an error event. Its message need not
+            // contain a generic keyword such as "error" (for example, an admission expiry).
+            if (string.Equals(topLevelType, "error", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(candidate))
+            {
+                message = candidate;
                 return true;
             }
 

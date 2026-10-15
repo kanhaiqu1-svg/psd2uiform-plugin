@@ -393,5 +393,5 @@ MonoBehaviour:
   sharedAssetsOutput: Assets\Examples\Common
   sharedPrefabOutput: Assets\Examples\CommonPrefab
   aiProviderConfig:
-    provider: 2
-    showCliWindow: 1
+    mode: 3
+    showCliWindow: 0

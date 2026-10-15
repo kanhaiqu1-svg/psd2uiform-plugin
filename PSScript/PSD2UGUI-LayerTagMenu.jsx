@@ -496,7 +496,7 @@ var REUSE_DEFAULT_SETTINGS = {
             var orderedTags = [];
             while (workingName.length > 0) {
                 var splitIndex = workingName.lastIndexOf(".");
-                if (splitIndex <= 0 || splitIndex >= workingName.length - 1) {
+                if (splitIndex < 0 || splitIndex >= workingName.length - 1) {
                     break;
                 }
 
@@ -825,7 +825,9 @@ var REUSE_DEFAULT_SETTINGS = {
 
     function normalizeRelativeReusePath(pathValue) {
         var normalized = trimString(pathValue).replace(/\\/g, "/");
-        normalized = normalized.replace(/^\/+/g, "").replace(/\/+$/g, "");
+        if (/^\//.test(normalized) || /:/.test(normalized) || /(^|\/)\.\.?($|\/)/.test(normalized) || /\/\//.test(normalized)) {
+            return "";
+        }
         return normalized;
     }
 
@@ -846,7 +848,7 @@ var REUSE_DEFAULT_SETTINGS = {
             return null;
         }
 
-        var scanResult = collectReuseCandidates(rootFolder);
+        var scanResult = collectReuseCandidates(rootFolder, prefix);
         if (scanResult.items.length < 1) {
             alert("复用目录中没有可用文件：\n" + rootPath);
             return null;
@@ -855,7 +857,7 @@ var REUSE_DEFAULT_SETTINGS = {
         return showReusePickerDialog(prefix, rootPath, scanResult.items, scanResult.duplicateCount);
     }
 
-    function collectReuseCandidates(rootFolder) {
+    function collectReuseCandidates(rootFolder, prefix) {
         var items = [];
         var duplicateCount = 0;
         var itemLookup = {};
@@ -875,6 +877,10 @@ var REUSE_DEFAULT_SETTINGS = {
 
                 var fileName = String(entry.name || "");
                 if (!fileName || /\.meta$/i.test(fileName)) {
+                    continue;
+                }
+                if (prefix === REUSE_TYPE_PREFAB ? !/\.prefab$/i.test(fileName)
+                    : !/\.(png|jpg|jpeg|tga|psd|tif|tiff|bmp|exr|asset)$/i.test(fileName)) {
                     continue;
                 }
 
@@ -915,7 +921,7 @@ var REUSE_DEFAULT_SETTINGS = {
         var rootLower = rootPath.toLowerCase();
         var fileLower = filePath.toLowerCase();
 
-        if (fileLower.indexOf(rootLower) !== 0) {
+        if (fileLower.indexOf(rootLower + "/") !== 0) {
             return null;
         }
 
@@ -925,7 +931,7 @@ var REUSE_DEFAULT_SETTINGS = {
             return null;
         }
 
-        relativePath = relativePath.replace(/\.[^\/\.]+$/g, "");
+        // Keep the extension so e.g. Icon.png and Icon.jpg remain distinct references.
         relativePath = normalizeRelativeReusePath(relativePath);
         return relativePath || null;
     }
@@ -940,7 +946,7 @@ var REUSE_DEFAULT_SETTINGS = {
         rootText.preferredSize.width = 520;
 
         if (duplicateCount > 0) {
-            dialog.add("statictext", undefined, "说明: 检测到同名无扩展名文件，已按相对路径去重 " + duplicateCount + " 项。");
+            dialog.add("statictext", undefined, "说明: 已按完整相对路径去重 " + duplicateCount + " 项。");
         }
 
         var searchRow = dialog.add("group");
@@ -1041,8 +1047,8 @@ var REUSE_DEFAULT_SETTINGS = {
         }
     }
 
-    function saveSelection() {
-        var selection = { layerIDs: [] };
+    function getSelectedLayerIDs() {
+        var layerIDs = [];
         try {
             var ref = new ActionReference();
             ref.putProperty(charIDToTypeID("Prpr"), stringIDToTypeID("targetLayersIDs"));
@@ -1051,11 +1057,40 @@ var REUSE_DEFAULT_SETTINGS = {
             if (desc.hasKey(stringIDToTypeID("targetLayersIDs"))) {
                 var list = desc.getList(stringIDToTypeID("targetLayersIDs"));
                 for (var i = 0; i < list.count; i++) {
-                    selection.layerIDs.push(list.getReference(i).getIdentifier());
+                    layerIDs.push(list.getReference(i).getIdentifier());
                 }
             }
         } catch (ignoredSelection) {}
-        return selection;
+        if (layerIDs.length > 0) return layerIDs;
+
+        // 不同 PS 版本/文档状态下 targetLayersIDs 可能缺失，旧属性返回图层索引。
+        try {
+            var indexRef = new ActionReference();
+            indexRef.putProperty(charIDToTypeID("Prpr"), stringIDToTypeID("targetLayers"));
+            indexRef.putEnumerated(charIDToTypeID("Dcmn"), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
+            var indexDesc = executeActionGet(indexRef);
+            if (indexDesc.hasKey(stringIDToTypeID("targetLayers"))) {
+                var indexList = indexDesc.getList(stringIDToTypeID("targetLayers"));
+                var offset = 0;
+                try { app.activeDocument.backgroundLayer; } catch (noBackground) { offset = 1; }
+                for (var j = 0; j < indexList.count; j++) {
+                    var layerRef = new ActionReference();
+                    layerRef.putIndex(charIDToTypeID("Lyr "), indexList.getReference(j).getIndex() + offset);
+                    var layerDesc = executeActionGet(layerRef);
+                    layerIDs.push(layerDesc.getInteger(stringIDToTypeID("layerID")));
+                }
+            }
+        } catch (ignoredIndexes) {}
+        if (layerIDs.length > 0) return layerIDs;
+
+        var activeRef = new ActionReference();
+        activeRef.putEnumerated(charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
+        layerIDs.push(executeActionGet(activeRef).getInteger(stringIDToTypeID("layerID")));
+        return layerIDs;
+    }
+
+    function saveSelection() {
+        return { layerIDs: getSelectedLayerIDs() };
     }
 
     function restoreSelection(selection) {
@@ -1082,37 +1117,12 @@ var REUSE_DEFAULT_SETTINGS = {
 
     function getSelectedLayerInfosFast() {
         var infos = [];
-        try {
-            var ref = new ActionReference();
-            ref.putProperty(charIDToTypeID("Prpr"), stringIDToTypeID("targetLayersIDs"));
-            ref.putEnumerated(charIDToTypeID("Dcmn"), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
-            var desc = executeActionGet(ref);
-            if (desc.hasKey(stringIDToTypeID("targetLayersIDs"))) {
-                var list = desc.getList(stringIDToTypeID("targetLayersIDs"));
-                for (var i = 0; i < list.count; i++) {
-                    var layerID = list.getReference(i).getIdentifier();
-                    var layerRef = new ActionReference();
-                    layerRef.putIdentifier(charIDToTypeID("Lyr "), layerID);
-                    var layerDesc = executeActionGet(layerRef);
-                    infos.push({
-                        id: layerID,
-                        name: layerDesc.getString(charIDToTypeID("Nm  "))
-                    });
-                }
-                return infos;
-            }
-        } catch (ignoredBatchRead) {}
-
-        if (app.activeDocument.activeLayer) {
-            try {
-                var activeRef = new ActionReference();
-                activeRef.putEnumerated(charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
-                var activeDesc = executeActionGet(activeRef);
-                infos.push({
-                    id: activeDesc.getInteger(stringIDToTypeID("layerID")),
-                    name: app.activeDocument.activeLayer.name
-                });
-            } catch (ignoredActiveLayer) {}
+        var layerIDs = getSelectedLayerIDs();
+        for (var i = 0; i < layerIDs.length; i++) {
+            var layerRef = new ActionReference();
+            layerRef.putIdentifier(charIDToTypeID("Lyr "), layerIDs[i]);
+            var layerDesc = executeActionGet(layerRef);
+            infos.push({ id: layerIDs[i], name: layerDesc.getString(charIDToTypeID("Nm  ")) });
         }
         return infos;
     }

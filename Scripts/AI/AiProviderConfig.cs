@@ -14,24 +14,16 @@
 
 #if UNITY_EDITOR
 using System;
+using UGF.EditorTools.Psd2UGUI.Cli;
 
 namespace UGF.EditorTools.Psd2UGUI
 {
     [Serializable]
     [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
-    internal enum AiProviderKind
-    {
-        CodexCli = 1,
-        ClaudeCodeCli = 2,
-        OpenCodeCli = 3
-    }
-
-    [Serializable]
-    [System.Reflection.Obfuscation(Feature = "renaming", Exclude = true, ApplyToMembers = true)]
     internal sealed class AiProviderConfig
     {
-        public AiProviderKind provider = AiProviderKind.CodexCli;
-        public bool showCliWindow = true;
+        public AiMode mode = AiMode.Qoder;
+        public bool showCliWindow;
     }
 }
 #endif
