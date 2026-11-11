@@ -207,6 +207,8 @@ namespace UGF.EditorTools.Psd2UGUI
                     string resName = node.HasReuseReference ? node.ReuseTargetDisplayName : layerName;
                     string cleanResName = Regex.Replace(resName, @"R(\d+)$", "", RegexOptions.IgnoreCase);
                     cleanResName = Regex.Replace(cleanResName, @"_s9$", "", RegexOptions.IgnoreCase);
+                    // Fatcat定制: 去掉 R 后缀后可能残留尾随下划线(img_xxx_R50 -> img_xxx_)
+                    cleanResName = cleanResName.TrimEnd('_');
                     string imgFileName = cleanResName + ".png";
                     string subFolder = "";
                     string lowerName = cleanResName.ToLower();
@@ -219,30 +221,43 @@ namespace UGF.EditorTools.Psd2UGUI
                     if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
                     string relativeXmlPath = $"{slotFolderName}/images/{(string.IsNullOrEmpty(subFolder) ? "" : subFolder + "/")}{imgFileName}";
 
-                    if (!node.HasReuseReference)
-                    {
-                        if (node.PreviewTexture == null) try { node.RefreshLayerTexture(true); } catch { }
-                        if (node.PreviewTexture != null)
-                        {
-                            string fullExportPath = Path.Combine(targetDir, imgFileName).Replace("\\", "/");
-                            if (Mathf.Approximately(resizeRatio, 1.0f))
-                                File.WriteAllBytes(fullExportPath, node.PreviewTexture.EncodeToPNG());
-                            else
-                            {
-                                int targetW = Mathf.Max(1, Mathf.RoundToInt(node.PreviewTexture.width * resizeRatio));
-                                int targetH = Mathf.Max(1, Mathf.RoundToInt(node.PreviewTexture.height * resizeRatio));
-                                var resized = ResizeTexture(node.PreviewTexture, targetW, targetH);
-                                File.WriteAllBytes(fullExportPath, resized.EncodeToPNG());
-                                UnityEngine.Object.DestroyImmediate(resized);
-                            }
-                        }
-                    }
-
                     // ==========================================
                     // 2. 修正镜像缩放逻辑：保留 Unity localScale 的负号
                     // ==========================================
-                    float texW = (node.PreviewTexture != null) ? node.PreviewTexture.width : width;
-                    float texH = (node.PreviewTexture != null) ? node.PreviewTexture.height : height;
+                    float texW = width;
+                    float texH = height;
+                    if (!node.HasReuseReference)
+                    {
+                        // Fatcat定制: PreviewTexture 是 50% 分辨率的预览缓存，不能作为导出源。
+                        // 必须走与 Unity 图片导出相同的全分辨率渲染(RenderNodeImage(false))。
+                        Texture2D exportTexture = null;
+                        try
+                        {
+                            exportTexture = node.CreateFullResolutionTexture();
+                            if (exportTexture != null)
+                            {
+                                texW = exportTexture.width;
+                                texH = exportTexture.height;
+                                string fullExportPath = Path.Combine(targetDir, imgFileName).Replace("\\", "/");
+                                if (Mathf.Approximately(resizeRatio, 1.0f))
+                                {
+                                    File.WriteAllBytes(fullExportPath, PsdTextureAssetUtility.EncodePng(exportTexture));
+                                }
+                                else
+                                {
+                                    int targetW = Mathf.Max(1, Mathf.RoundToInt(texW * resizeRatio));
+                                    int targetH = Mathf.Max(1, Mathf.RoundToInt(texH * resizeRatio));
+                                    var resized = ResizeTexture(exportTexture, targetW, targetH);
+                                    File.WriteAllBytes(fullExportPath, PsdTextureAssetUtility.EncodePng(resized));
+                                    UnityEngine.Object.DestroyImmediate(resized);
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            if (exportTexture != null) UnityEngine.Object.DestroyImmediate(exportTexture);
+                        }
+                    }
                     float finalResourceW = texW * resizeRatio;
                     float finalResourceH = texH * resizeRatio;
 

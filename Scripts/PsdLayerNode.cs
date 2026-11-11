@@ -1527,6 +1527,22 @@ namespace UGF.EditorTools.Psd2UGUI
             return CreateTextureFromRenderedImage(rendered, true);
         }
 
+        /// <summary>
+        /// Fatcat定制: 全分辨率渲染纹理，供 Cocos 导出等需要原始像素的场景使用。
+        /// PreviewTexture 走的是 RenderPreview（固定 50% 分辨率），不能作为导出源。
+        /// 返回的是临时纹理，调用方负责 DestroyImmediate。
+        /// </summary>
+        internal Texture2D CreateFullResolutionTexture()
+        {
+            var rendered = RenderNodeImage(previewRender: false);
+            if (rendered == null || rendered.IsEmpty)
+            {
+                return null;
+            }
+
+            return CreateTextureFromRenderedImage(rendered, true);
+        }
+
         private static Texture2D CreateTextureFromRenderedImage(PsdRenderedImage rendered, bool transient)
         {
             if (rendered == null || rendered.IsEmpty)
