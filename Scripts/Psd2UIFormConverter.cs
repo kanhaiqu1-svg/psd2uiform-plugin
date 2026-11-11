@@ -252,6 +252,8 @@ namespace UGF.EditorTools.Psd2UGUI
                 }
             }
             EditorGUILayout.EndHorizontal();
+            // Fatcat定制: 重复素材(复用)检测入口 —— 纯像素比对, 不涉及 AI
+            ReuseTagPanel.Draw(targetLogic);
             if (GUILayout.Button(generateUIFormBt, btHeight))
             {
                 targetLogic.GenerateUIForm();
