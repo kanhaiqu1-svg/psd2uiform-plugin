@@ -39,12 +39,12 @@ namespace UGF.EditorTools.Psd2UGUI
 
             EditorGUILayout.LabelField(
                 new GUIContent("九宫格自动判定",
-                    "用插件自己的边框算法判断哪些图层适合九宫格，条件：四边都>1、中心区>=10%、左右上下大致对称。纯本地计算，不调用 AI。"),
+                    "用插件自己的边框算法判断哪些贴图适合九宫格，条件：四边都>1、中心区>=10%、左右上下大致对称。复用(ref)贴图同样参与判定，同一张图的所有实例共享同一份边框。纯本地计算，不调用 AI。"),
                 EditorStyles.boldLabel);
 
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button(new GUIContent("判定九宫格",
-                    "只看已勾选导出、未复用、没有显式 imageType 标签的图层。"),
+                    "只看已勾选导出或已复用的图层，且没有显式 imageType 标签。"),
                 GUILayout.Height(24)))
             {
                 Run(converter);
@@ -76,16 +76,20 @@ namespace UGF.EditorTools.Psd2UGUI
                 if (s.Node == null) continue;
                 EditorGUILayout.BeginHorizontal();
                 s.Selected = EditorGUILayout.Toggle(s.Selected, GUILayout.Width(18));
-                EditorGUILayout.LabelField(s.Node.name, GUILayout.MinWidth(150));
+                EditorGUILayout.LabelField(s.Node.name, GUILayout.MinWidth(140));
                 EditorGUILayout.LabelField(
                     $"{s.Width}×{s.Height}  边 {s.Border.x:0}/{s.Border.y:0}/{s.Border.z:0}/{s.Border.w:0}  中心 {s.CenterWidth}×{s.CenterHeight}",
-                    EditorStyles.miniLabel, GUILayout.MinWidth(220));
+                    EditorStyles.miniLabel, GUILayout.MinWidth(210));
+                if (!string.IsNullOrEmpty(s.Note))
+                {
+                    EditorGUILayout.LabelField(new GUIContent("↺", s.Note), GUILayout.Width(18));
+                }
                 EditorGUILayout.EndHorizontal();
             }
             EditorGUILayout.EndScrollView();
 
             EditorGUILayout.LabelField(
-                "边框顺序：左/下/右/上。生成 prefab 时 ApplySpriteNineSlice 会写入边框（仅在空白时），之后可继续用 Crop Minimal 9-Slice 裁掉多余范围。",
+                "边框顺序：左/下/右/上。边框属于贴图：同一张图被打标的所有实例共享一份边框，生成时写入（仅在空白时）。↺ 表示该节点是复用，边框取自它的源图层。",
                 EditorStyles.miniLabel);
 
             EditorGUI.BeginDisabledGroup(selected == 0);
@@ -102,9 +106,27 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             try
             {
-                suggestions = SliceTagFinder.Find(converter, out string error);
-                status = error ?? $"判定完成：{suggestions.Count} 个候选。确认后勾选并应用。";
-                statusType = suggestions.Count > 0 ? MessageType.Info : MessageType.None;
+                var found = SliceTagFinder.Find(converter, out string message);
+                if (!string.IsNullOrEmpty(message) && message.Contains("已取消"))
+                {
+                    suggestions = null;
+                    status = message;
+                    statusType = MessageType.Warning;
+                    return;
+                }
+
+                suggestions = found;
+                if (found.Count > 0)
+                {
+                    status = $"判定完成：{found.Count} 个候选。"
+                             + (string.IsNullOrEmpty(message) ? string.Empty : " " + message);
+                    statusType = MessageType.Info;
+                }
+                else
+                {
+                    status = message ?? "没有候选。";
+                    statusType = MessageType.None;
+                }
             }
             catch (Exception ex)
             {
@@ -177,14 +199,15 @@ namespace UGF.EditorTools.Psd2UGUI
         private static string BuildClipboardText()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("图层\t尺寸\t边框(左/下/右/上)\t中心区");
+            sb.AppendLine("图层\t尺寸\t边框(左/下/右/上)\t中心区\t备注");
             foreach (var s in suggestions)
             {
                 if (s.Node == null) continue;
                 sb.Append(s.Node.name).Append('\t')
                   .Append(s.Width).Append('×').Append(s.Height).Append('\t')
                   .Append($"{s.Border.x:0}/{s.Border.y:0}/{s.Border.z:0}/{s.Border.w:0}").Append('\t')
-                  .Append(s.CenterWidth).Append('×').AppendLine(s.CenterHeight.ToString());
+                  .Append(s.CenterWidth).Append('×').Append(s.CenterHeight).Append('\t')
+                  .AppendLine(s.Note ?? string.Empty);
             }
             return sb.ToString();
         }
