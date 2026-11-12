@@ -254,6 +254,8 @@ namespace UGF.EditorTools.Psd2UGUI
             EditorGUILayout.EndHorizontal();
             // Fatcat定制: 重复素材(复用)检测入口 —— 纯像素比对, 不涉及 AI
             ReuseTagPanel.Draw(targetLogic);
+            // Fatcat定制: 九宫格自动判定入口 —— 纯边框规则, 不涉及 AI
+            SliceTagPanel.Draw(targetLogic);
             if (GUILayout.Button(generateUIFormBt, btHeight))
             {
                 targetLogic.GenerateUIForm();
