@@ -4,6 +4,7 @@ using System.Linq;
 using System.Xml.Linq;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEditor;
@@ -246,6 +247,20 @@ namespace UGF.EditorTools.Psd2UGUI
                                 texH = exportTexture.height;
                                 // Fatcat定制: 边框必须在原始分辨率上算，之后按 R 缩放倍率同步缩放。
                                 if (is9Slice) nineSliceBorder = UGUIParser.CalculateTexture9SliceBorder(exportTexture);
+                                // Fatcat定制: 可选的九宫格中心区裁剪（只影响 Cocos 导出）。
+                                // 裁剪后边框不变(仍从边缘起算)，Scale9Width/Height 会随之变成 1。
+                                if (is9Slice && nineSliceBorder != Vector4.zero
+                                    && Psd2UIFormSettings.Instance.CocosCropMinimalNineSlice)
+                                {
+                                    var croppedTexture = CropNineSliceCenter(exportTexture, nineSliceBorder);
+                                    if (croppedTexture != null)
+                                    {
+                                        UnityEngine.Object.DestroyImmediate(exportTexture);
+                                        exportTexture = croppedTexture;
+                                        texW = croppedTexture.width;
+                                        texH = croppedTexture.height;
+                                    }
+                                }
                                 string fullExportPath = Path.Combine(targetDir, imgFileName).Replace("\\", "/");
                                 if (Mathf.Approximately(resizeRatio, 1.0f))
                                 {
@@ -368,6 +383,137 @@ namespace UGF.EditorTools.Psd2UGUI
         }
 
         /// <summary>
+        /// Fatcat定制: 把九宫格中心区压到 1 像素（只用于 Cocos 导出，省贴图尺寸）。
+        /// 中心带在「九宫格识别容差」内可折叠时才裁，否则返回 null 保持原图。
+        /// 边框值不变（仍从贴图边缘起算），因此裁剪后 Scale9Width/Height 恰好是 1。
+        /// 返回的新纹理由调用方负责销毁。
+        /// </summary>
+        private static Texture2D CropNineSliceCenter(Texture2D source, Vector4 border)
+        {
+            if (!TryPlanNineSliceCrop(source, border, out var plan)) return null;
+
+            int width = plan.SourceWidth, height = plan.SourceHeight;
+            int left = plan.Left, bottom = plan.Bottom;
+            int centerWidth = width - plan.Left - plan.Right;
+            int centerHeight = height - plan.Bottom - plan.Top;
+            bool cropHorizontal = plan.CropHorizontal, cropVertical = plan.CropVertical;
+            int newWidth = plan.NewWidth, newHeight = plan.NewHeight;
+            int centerX = plan.CenterX, centerY = plan.CenterY;
+
+            byte[] sourceBytes;
+            try { sourceBytes = source.GetRawTextureData<byte>().ToArray(); }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Cocos Studio] 读取原始纹理失败，跳过九宫格中心裁剪: {ex.Message}");
+                return null;
+            }
+            int bytesPerPixel = sourceBytes.Length / Mathf.Max(1, width * height);
+            if (bytesPerPixel <= 0) return null;
+            var targetBytes = new byte[newWidth * newHeight * bytesPerPixel];
+
+            for (int y = 0; y < newHeight; y++)
+            {
+                int sourceY = MapCollapsedAxisIndex(y, cropVertical, bottom, centerHeight, centerY);
+                int sourceRow = sourceY * width * bytesPerPixel;
+                int targetRow = y * newWidth * bytesPerPixel;
+                for (int x = 0; x < newWidth; x++)
+                {
+                    int sourceX = MapCollapsedAxisIndex(x, cropHorizontal, left, centerWidth, centerX);
+                    System.Buffer.BlockCopy(sourceBytes, sourceRow + sourceX * bytesPerPixel,
+                                            targetBytes, targetRow + x * bytesPerPixel, bytesPerPixel);
+                }
+            }
+
+            Texture2D result = null;
+            try
+            {
+                result = new Texture2D(newWidth, newHeight, source.graphicsFormat,
+                                       UnityEngine.Experimental.Rendering.TextureCreationFlags.None)
+                {
+                    hideFlags = HideFlags.HideAndDontSave,
+                    alphaIsTransparency = source.alphaIsTransparency
+                };
+                result.LoadRawTextureData(targetBytes);
+                result.Apply(false, false);
+                return result;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Cocos Studio] 九宫格中心裁剪失败，使用原图: {ex.Message}");
+                if (result != null) UnityEngine.Object.DestroyImmediate(result);
+                return null;
+            }
+        }
+
+        /// <summary>Fatcat定制: 九宫格中心裁剪方案（压到 1 像素）。</summary>
+        private struct NineSliceCropPlan
+        {
+            internal int Left, Bottom, Right, Top;
+            internal bool CropHorizontal, CropVertical;
+            internal int SourceWidth, SourceHeight;
+            internal int NewWidth, NewHeight;
+            internal int CenterX, CenterY;
+        }
+
+        /// <summary>
+        /// Fatcat定制: 判断这张九宫格贴图能不能把中心区压到 1 像素。
+        /// 中心带必须在「九宫格识别容差」内可折叠；渐变/图案的中心带返回 false（压了会变样）。
+        /// 已经是最小九宫格、或某一轴带宽 ≤1 时同样返回 false。
+        /// </summary>
+        private static bool TryPlanNineSliceCrop(Texture2D texture, Vector4 border, out NineSliceCropPlan plan)
+        {
+            plan = default;
+            if (texture == null) return false;
+            int width = texture.width;
+            int height = texture.height;
+            int left = Mathf.Clamp(Mathf.RoundToInt(border.x), 0, width);
+            int bottom = Mathf.Clamp(Mathf.RoundToInt(border.y), 0, height);
+            int right = Mathf.Clamp(Mathf.RoundToInt(border.z), 0, width - left);
+            int top = Mathf.Clamp(Mathf.RoundToInt(border.w), 0, height - bottom);
+            int centerWidth = width - left - right;
+            int centerHeight = height - bottom - top;
+            if (centerWidth <= 1 && centerHeight <= 1) return false;
+
+            Color32[] pixels;
+            try { pixels = texture.GetPixels32(); }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Cocos Studio] 读取像素失败，跳过九宫格中心裁剪: {ex.Message}");
+                return false;
+            }
+
+            var clamped = new Vector4(left, bottom, right, top);
+            int tolerance = UGUIParser.Instance != null ? UGUIParser.Instance.NineSliceBorderTolerance : 5;
+            int deltaWidth = 0, deltaHeight = 0;
+            bool cropHorizontal = centerWidth > 1
+                && PsdImageComparer.CanCollapse(pixels, width, height, clamped, true, tolerance, out deltaWidth);
+            bool cropVertical = centerHeight > 1
+                && PsdImageComparer.CanCollapse(pixels, width, height, clamped, false, tolerance, out deltaHeight);
+            if (!cropHorizontal && !cropVertical) return false;
+
+            plan = new NineSliceCropPlan
+            {
+                Left = left, Bottom = bottom, Right = right, Top = top,
+                CropHorizontal = cropHorizontal, CropVertical = cropVertical,
+                SourceWidth = width, SourceHeight = height,
+                NewWidth = cropHorizontal ? left + 1 + right : width,
+                NewHeight = cropVertical ? bottom + 1 + top : height,
+                CenterX = left + (centerWidth - 1) / 2,
+                CenterY = bottom + (centerHeight - 1) / 2
+            };
+            return true;
+        }
+
+        private static int MapCollapsedAxisIndex(int targetIndex, bool cropAxis, int stretchStart, int stretchLength, int centerIndex)
+        {
+            if (!cropAxis) return targetIndex;
+            if (targetIndex < stretchStart) return targetIndex;
+            if (targetIndex == stretchStart) return centerIndex;
+            int stretchEndExclusive = stretchStart + stretchLength;
+            return stretchEndExclusive + (targetIndex - stretchStart - 1);
+        }
+
+        /// <summary>
         /// Fatcat定制: 与 Unity 共用同一套判定——取节点最终 Image.Type。
         /// 这样 .sliced/.tiled 标签、AI 模板类型、九宫格自动标记全都一致生效。
         /// </summary>
@@ -402,6 +548,15 @@ namespace UGF.EditorTools.Psd2UGUI
                             texW = texture.width;
                             texH = texture.height;
                             border = UGUIParser.CalculateTexture9SliceBorder(texture);
+                            // Fatcat定制: 复用节点与源图层指向同一张 PNG，尺寸必须和源图层裁剪后的结果一致，
+                            // 否则 .csd 里的 Scale9Width/Height 会按未裁尺寸算，和贴图对不上。
+                            if (border != Vector4.zero
+                                && Psd2UIFormSettings.Instance.CocosCropMinimalNineSlice
+                                && TryPlanNineSliceCrop(texture, border, out var plan))
+                            {
+                                texW = plan.NewWidth;
+                                texH = plan.NewHeight;
+                            }
                         }
                         finally
                         {

@@ -68,6 +68,12 @@ namespace UGF.EditorTools.Psd2UGUI
         /// 导出图片后自动裁剪九宫格中心区域至最小尺寸
         /// </summary>
         public bool AutoCropMinimalNineSlice = false;
+        /// <summary>
+        /// Fatcat定制: CocosStudio 导出时把九宫格中心区域压到 1 像素。
+        /// 只影响 .csd 导出(它自己写 PNG，不经过 Unity 的图片导出)，与 AutoCropMinimalNineSlice 相互独立。
+        /// 边框不会被压掉；中心带不均匀时自动跳过。
+        /// </summary>
+        public bool CocosCropMinimalNineSlice = false;
         public PsdImageReuseTolerance ImageReuseTolerance = PsdImageReuseTolerance.Visual;
         public string LastUIFormOutputDir = "Assets";
     }

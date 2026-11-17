@@ -133,6 +133,8 @@ namespace UGF.EditorTools.Psd2UGUI
         private static readonly GUIContent NineSliceLabel = new GUIContent("九宫格识别容差", "默认值为 5。值越大，自动识别九宫格边框时允许的像素差异越大。");
         private static readonly GUIContent ImageReuseLabel = new GUIContent("图片复用精度", "用于普通图片和九宫格图片的自动复用，重新导出或整理图片后生效。Point 采样与高位深图片仍使用精确匹配。");
         private static readonly GUIContent AutoCropLabel = new GUIContent("自动裁剪九宫格", "导出时裁剪九宫格的中心区域。建议先检查边框，再通过图片右键菜单 Psd2UIForm > Crop Minimal 9-Slice 手动裁剪。");
+        // Fatcat定制: 只作用于 CocosStudio 导出
+        private static readonly GUIContent CocosCropLabel = new GUIContent("Cocos导出裁剪九宫格", "CocosStudio 导出 .csd 时，把九宫格中心区域压到 1 像素（节省贴图尺寸）。只影响 Cocos 导出，与上面的「自动裁剪九宫格」相互独立；中心带不均匀的图会自动跳过。");
         private static readonly GUIContent SharedImagesLabel = new GUIContent("复用图片目录", "复用图片的导出目录，路径相对于 Unity 工程根目录。");
         private static readonly GUIContent SharedPrefabsLabel = new GUIContent("复用预制体目录", "复用预制体的导出目录，路径相对于 Unity 工程根目录。");
         private static readonly GUIContent CliWindowLabel = new GUIContent("显示调试窗口", "AI 识别时显示 CLI 日志窗口，任务结束或取消后自动关闭。");
@@ -264,14 +266,19 @@ namespace UGF.EditorTools.Psd2UGUI
                 var reuseTolerance = (PsdImageReuseTolerance)EditorGUILayout.Popup(ImageReuseLabel, (int)settings.ImageReuseTolerance, ImageReuseToleranceNames);
                 nineSliceBorderTolerance.intValue = EditorGUILayout.IntSlider(NineSliceLabel, nineSliceBorderTolerance.intValue, 1, 10);
                 bool autoCrop = EditorGUILayout.Toggle(AutoCropLabel, settings.AutoCropMinimalNineSlice);
-                if (reuseTolerance != settings.ImageReuseTolerance || autoCrop != settings.AutoCropMinimalNineSlice)
+                // Fatcat定制: Cocos 导出自己的裁剪开关(只管 .csd 导出)
+                bool cocosCrop = EditorGUILayout.Toggle(CocosCropLabel, settings.CocosCropMinimalNineSlice);
+                if (reuseTolerance != settings.ImageReuseTolerance || autoCrop != settings.AutoCropMinimalNineSlice
+                    || cocosCrop != settings.CocosCropMinimalNineSlice)
                 {
                     Undo.RecordObject(settings, "修改图片处理设置");
                     settings.ImageReuseTolerance = reuseTolerance;
                     settings.AutoCropMinimalNineSlice = autoCrop;
+                    settings.CocosCropMinimalNineSlice = cocosCrop;
                     Psd2UIFormSettings.Save();
                 }
                 if (autoCrop) EditorGUILayout.HelpBox("自动识别的边框可能不准确，导出后请检查。", MessageType.Info);
+                if (cocosCrop) EditorGUILayout.HelpBox("Cocos 导出会把九宫格中心区压到 1 像素（中心带不均匀的图会自动跳过），只影响 .csd 输出的贴图尺寸。", MessageType.Info);
             }
 
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
