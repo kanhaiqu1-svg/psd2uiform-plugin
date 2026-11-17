@@ -123,14 +123,23 @@ namespace UGF.EditorTools.Psd2UGUI
         {
             assetPath = Psd2UIFormConverter.NormalizeToAssetPath(assetPath); // Fatcat定制: 路径标准化(软链接映射)
             var texImporter = AssetImporter.GetAtPath(assetPath) as TextureImporter;
-            if (texImporter == null || texImporter.textureType != TextureImporterType.Sprite)
+            if (texImporter == null)
             {
+                Debug.LogWarning($"[Crop Minimal 9-Slice] 不是可导入的贴图，已跳过: {assetPath}");
+                return false;
+            }
+
+            // Fatcat定制: 原来这条直接 return，完全没有日志，用户只会看到"点了没反应"。
+            if (texImporter.textureType != TextureImporterType.Sprite)
+            {
+                Debug.LogWarning($"[Crop Minimal 9-Slice] 该贴图不是 Sprite 类型(textureType={texImporter.textureType})，"
+                                 + $"无法做九宫格。请先把 Texture Type 改成 Sprite (2D and UI)。: {assetPath}");
                 return false;
             }
 
             if (texImporter.spriteImportMode != SpriteImportMode.Single)
             {
-                Debug.LogWarning($"Crop Minimal 9-Slice only supports Single Sprite: {assetPath}");
+                Debug.LogWarning($"[Crop Minimal 9-Slice] 只支持 Single Sprite，当前是 {texImporter.spriteImportMode}: {assetPath}");
                 return false;
             }
 
@@ -141,27 +150,28 @@ namespace UGF.EditorTools.Psd2UGUI
             int top = Mathf.RoundToInt(border.w);
             if (border == Vector4.zero || left < 0 || bottom < 0 || right < 0 || top < 0)
             {
-                Debug.LogWarning($"Sprite Border is invalid or empty: {assetPath}");
+                Debug.LogWarning($"[Crop Minimal 9-Slice] 该贴图还没有九宫格边框(spriteBorder={border})，没有可裁的东西。"
+                                 + $"先用【Assets/Psd2UIForm/Auto Sprite Border】算边框，或给图层打 .sliced 后重新生成UIForm。: {assetPath}");
                 return false;
             }
 
             if (border.x != left || border.y != bottom || border.z != right || border.w != top)
             {
-                Debug.LogWarning($"Crop Minimal 9-Slice requires integer pixel borders: {assetPath}");
+                Debug.LogWarning($"[Crop Minimal 9-Slice] 边框必须是整数像素，当前是 {border}: {assetPath}");
                 return false;
             }
 
             string fullPath = GetAssetFullPath(assetPath);
             if (!File.Exists(fullPath))
             {
-                Debug.LogWarning($"Sprite file not found: {assetPath}");
+                Debug.LogWarning($"[Crop Minimal 9-Slice] 找不到贴图文件: {assetPath}");
                 return false;
             }
 
             // 裁剪固定走 RGBA32+EncodeToPNG，会把 16bit 导出量化成 8bit 而 userData 标记不变，直接跳过。
             if (IsSixteenBitPng(fullPath))
             {
-                Debug.LogWarning($"Crop Minimal 9-Slice 会把 16bit PNG 量化成 8bit，已跳过: {assetPath}");
+                Debug.LogWarning($"[Crop Minimal 9-Slice] 会把 16bit PNG 量化成 8bit，已跳过: {assetPath}");
                 return false;
             }
 
@@ -182,16 +192,42 @@ namespace UGF.EditorTools.Psd2UGUI
                 int centerHeight = height - bottom - top;
                 if (centerWidth <= 0 || centerHeight <= 0)
                 {
-                    Debug.LogWarning($"Sprite Border exceeds texture size: {assetPath}");
+                    Debug.LogWarning($"[Crop Minimal 9-Slice] 边框({border})超过贴图尺寸({width}x{height}): {assetPath}");
+                    return false;
+                }
+
+                if (centerWidth <= 1 && centerHeight <= 1)
+                {
+                    Debug.Log($"[Crop Minimal 9-Slice] 已经是最小九宫格（中心区 {centerWidth}x{centerHeight}），无需再裁: {assetPath}");
                     return false;
                 }
 
                 Color32[] sourcePixels = sourceTexture.GetPixels32();
-                bool cropHorizontal = centerWidth > 1 && PsdImageComparer.CanCollapse(sourcePixels, width, height, border, true);
-                bool cropVertical = centerHeight > 1 && PsdImageComparer.CanCollapse(sourcePixels, width, height, border, false);
+                // Fatcat定制: 折叠容差与边框算法(NineSliceBorderTolerance)保持一致，
+                // 否则「算得出边框却裁不了」——中心带只差 1~5/255 就会被判为不可折叠。
+                int tolerance = UGUIParser.Instance != null ? UGUIParser.Instance.NineSliceBorderTolerance : 5;
+                int deltaH = 0, deltaV = 0;
+                bool cropHorizontal = centerWidth > 1
+                    && PsdImageComparer.CanCollapse(sourcePixels, width, height, border, true, tolerance, out deltaH);
+                bool cropVertical = centerHeight > 1
+                    && PsdImageComparer.CanCollapse(sourcePixels, width, height, border, false, tolerance, out deltaV);
                 if (!cropHorizontal && !cropVertical)
                 {
-                    Debug.LogWarning($"Sprite has no strictly repeated stretch band to collapse: {assetPath}");
+                    int exceed = centerWidth > 1 ? deltaH : deltaV;
+                    // Fatcat定制: 区分「差一点点」和「根本不均匀」。
+                    // 手拉的边框常常画在渐变/图案上，那种情况压成 1 像素会改变外观，
+                    // 属于「不该裁」而不是「裁失败」——Minimal 裁剪只是省贴图尺寸的可选步骤。
+                    if (exceed <= 32)
+                    {
+                        Debug.LogWarning($"[Crop Minimal 9-Slice] 中心带差异 {exceed}/255 超过当前容差 {tolerance}，无法折叠。"
+                                         + $"把配置里的「九宫格容差」调到 ≥{exceed} 再裁: {assetPath}");
+                    }
+                    else
+                    {
+                        Debug.Log($"[Crop Minimal 9-Slice] 跳过（不是错误）：中心区是渐变/图案，像素差异 {exceed}/255，"
+                                  + $"压成 1 像素会改变外观，本来就不该用 Minimal 裁剪。"
+                                  + $"手拉的边框已经生效，九宫格拉伸不受影响: {assetPath}");
+                    }
                     return false;
                 }
 

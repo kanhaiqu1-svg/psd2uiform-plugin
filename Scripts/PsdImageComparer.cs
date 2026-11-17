@@ -265,18 +265,30 @@ namespace UGF.EditorTools.Psd2UGUI
         }
 
         // Cropping is lossless representation reduction, never a perceptual operation.
-        internal static bool CanCollapse(Color32[] pixels, int width, int height, Vector4 border, bool horizontal)
+        // Fatcat定制: 增加 tolerance。边框算法(CalculateTexture9SliceBorder)按容差判定可拉伸带，
+        // 这里必须用同一容差，否则「算得出边框却裁不了」——中心带只差 1~5/255 就被判为不可折叠。
+        internal static bool CanCollapse(Color32[] pixels, int width, int height, Vector4 border, bool horizontal,
+                                         int tolerance, out int maxDelta)
         {
-            int start = Mathf.RoundToInt(horizontal ? border.x : border.y);
-            int end = (horizontal ? width : height) - Mathf.RoundToInt(horizontal ? border.z : border.w);
+            maxDelta = 0;
+            int axisLength = horizontal ? width : height;
+            int start = Mathf.Clamp(Mathf.RoundToInt(horizontal ? border.x : border.y), 0, Mathf.Max(0, axisLength - 1));
+            int end = Mathf.Clamp((horizontal ? width : height) - Mathf.RoundToInt(horizontal ? border.z : border.w),
+                                  start + 1, axisLength);
             int cross = horizontal ? height : width;
+            tolerance = Mathf.Max(0, tolerance);
             for (int c = 0; c < cross; c++)
             {
-                var first = pixels[horizontal ? c * width + start : start * width + c];
+                int firstIndex = horizontal ? c * width + start : start * width + c;
+                if (firstIndex < 0 || firstIndex >= pixels.Length) continue;
+                var first = pixels[firstIndex];
                 for (int p = start + 1; p < end; p++)
                 {
-                    var next = pixels[horizontal ? c * width + p : p * width + c];
-                    if (first.r != next.r || first.g != next.g || first.b != next.b || first.a != next.a) return false;
+                    int index = horizontal ? c * width + p : p * width + c;
+                    if (index < 0 || index >= pixels.Length) continue;
+                    int delta = Delta(first, pixels[index]);
+                    if (delta > maxDelta) maxDelta = delta;
+                    if (delta > tolerance) return false;
                 }
             }
             return true;
